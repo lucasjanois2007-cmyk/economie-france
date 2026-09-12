@@ -1,0 +1,745 @@
+```html
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>HexaPulse — Economic Intelligence</title>
+
+    <meta
+        name="description"
+        content="HexaPulse — Economic Intelligence. Suivez les annonces économiques, les marchés et les opportunités stratégiques."
+    >
+
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+
+<body>
+
+    <!-- =========================================
+         NAVIGATION
+    ========================================== -->
+
+    <header class="navbar">
+
+        <div class="brand">
+
+            <div class="brand-mark">
+                H
+            </div>
+
+            <div class="brand-text">
+
+                <div class="brand-name">
+                    HexaPulse
+                </div>
+
+                <div class="brand-subtitle">
+                    Economic Intelligence
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <nav class="navigation">
+
+            <a href="#calendar">
+                Calendrier
+            </a>
+
+            <a href="#water">
+                Water
+            </a>
+
+            <a href="#premium">
+                Premium
+            </a>
+
+        </nav>
+
+    </header>
+
+
+    <!-- =========================================
+         CONTENU PRINCIPAL
+    ========================================== -->
+
+    <main>
+
+
+        <!-- =====================================
+             HERO
+        ====================================== -->
+
+        <section class="hero">
+
+            <div class="hero-content">
+
+                <div class="hero-badge">
+
+                    <span class="status-dot"></span>
+
+                    FRANCE · EUROPE
+
+                </div>
+
+
+                <h1>
+
+                    Le calendrier économique
+                    <span>en temps réel.</span>
+
+                </h1>
+
+
+                <p class="hero-description">
+
+                    Suis les annonces économiques importantes
+                    et identifie rapidement celles susceptibles
+                    de faire bouger les marchés.
+
+                </p>
+
+
+                <div class="hero-actions">
+
+                    <button
+                        id="refreshButton"
+                        class="primary-button"
+                    >
+
+                        <span>↻</span>
+
+                        Actualiser
+
+                    </button>
+
+
+                    <a
+                        href="#calendar"
+                        class="secondary-button"
+                    >
+
+                        Voir les annonces
+
+                        <span>→</span>
+
+                    </a>
+
+                </div>
+
+            </div>
+
+
+            <div class="hero-decoration">
+
+                <div class="pulse-circle"></div>
+
+                <div class="pulse-circle pulse-circle-2"></div>
+
+                <div class="pulse-line"></div>
+
+            </div>
+
+        </section>
+
+
+
+        <!-- =====================================
+             STATISTIQUES
+        ====================================== -->
+
+        <section class="stats-grid">
+
+
+            <div class="stat-card">
+
+                <div class="stat-top">
+
+                    <span class="stat-label">
+                        ANNONCES
+                    </span>
+
+                    <span class="stat-icon">
+                        ◇
+                    </span>
+
+                </div>
+
+
+                <div
+                    id="announcementCount"
+                    class="stat-value"
+                >
+                    —
+                </div>
+
+
+                <div class="stat-description">
+                    événements détectés
+                </div>
+
+            </div>
+
+
+
+            <div class="stat-card">
+
+                <div class="stat-top">
+
+                    <span class="stat-label">
+                        IMPACT FORT
+                    </span>
+
+                    <span class="impact-dot high"></span>
+
+                </div>
+
+
+                <div
+                    id="highImpactCount"
+                    class="stat-value"
+                >
+                    —
+                </div>
+
+
+                <div class="stat-description">
+                    forte volatilité potentielle
+                </div>
+
+            </div>
+
+
+
+            <div class="stat-card">
+
+                <div class="stat-top">
+
+                    <span class="stat-label">
+                        IMPACT MOYEN
+                    </span>
+
+                    <span class="impact-dot medium"></span>
+
+                </div>
+
+
+                <div
+                    id="mediumImpactCount"
+                    class="stat-value"
+                >
+                    —
+                </div>
+
+
+                <div class="stat-description">
+                    impact potentiel
+                </div>
+
+            </div>
+
+
+
+            <div class="stat-card">
+
+                <div class="stat-top">
+
+                    <span class="stat-label">
+                        MARCHÉ
+                    </span>
+
+                    <span class="live-badge">
+                        LIVE
+                    </span>
+
+                </div>
+
+
+                <div class="stat-value">
+                    FR / EU
+                </div>
+
+
+                <div class="stat-description">
+                    surveillance active
+                </div>
+
+            </div>
+
+        </section>
+
+
+
+        <!-- =====================================
+             CALENDRIER
+        ====================================== -->
+
+        <section
+            id="calendar"
+            class="section"
+        >
+
+            <div class="section-header">
+
+                <div>
+
+                    <div class="section-label">
+                        ECONOMIC CALENDAR
+                    </div>
+
+                    <h2>
+                        Annonces économiques
+                    </h2>
+
+                    <p>
+                        Les événements susceptibles
+                        d'influencer les marchés.
+                    </p>
+
+                </div>
+
+
+                <div class="timezone-box">
+
+                    <span class="timezone-dot"></span>
+
+                    Europe / Paris
+
+                </div>
+
+            </div>
+
+
+            <div
+                id="eventsContainer"
+                class="events-container"
+            >
+
+                <div class="loading-card">
+
+                    <div class="loading-spinner"></div>
+
+                    <span>
+                        Chargement des annonces...
+                    </span>
+
+                </div>
+
+            </div>
+
+        </section>
+
+
+
+        <!-- =====================================
+             WATER WATCHLIST
+        ====================================== -->
+
+        <section
+            id="water"
+            class="section water-section"
+        >
+
+            <div class="water-header">
+
+                <div>
+
+                    <div class="section-label">
+                        WATER WATCHLIST
+                    </div>
+
+                    <h2>
+                        L'eau devient un marché stratégique.
+                    </h2>
+
+                    <p>
+                        Surveille les événements susceptibles
+                        d'influencer le secteur mondial de l'eau.
+                    </p>
+
+                </div>
+
+
+                <div class="water-symbol">
+                    ◇
+                </div>
+
+            </div>
+
+
+
+            <div class="water-grid">
+
+
+                <article class="water-card">
+
+                    <div class="water-card-number">
+                        01
+                    </div>
+
+                    <div class="water-card-icon">
+                        ◈
+                    </div>
+
+                    <h3>
+                        Stress hydrique
+                    </h3>
+
+                    <p>
+                        Sécheresses, pénuries et évolution
+                        des ressources disponibles.
+                    </p>
+
+                    <span class="water-status">
+                        À SURVEILLER
+                    </span>
+
+                </article>
+
+
+
+                <article class="water-card">
+
+                    <div class="water-card-number">
+                        02
+                    </div>
+
+                    <div class="water-card-icon">
+                        ◈
+                    </div>
+
+                    <h3>
+                        Infrastructures
+                    </h3>
+
+                    <p>
+                        Investissements publics, réseaux,
+                        traitement et modernisation.
+                    </p>
+
+                    <span class="water-status">
+                        STRATÉGIQUE
+                    </span>
+
+                </article>
+
+
+
+                <article class="water-card">
+
+                    <div class="water-card-number">
+                        03
+                    </div>
+
+                    <div class="water-card-icon">
+                        ◈
+                    </div>
+
+                    <h3>
+                        Dessalement
+                    </h3>
+
+                    <p>
+                        Développement des capacités
+                        de production d'eau douce.
+                    </p>
+
+                    <span class="water-status">
+                        CROISSANCE
+                    </span>
+
+                </article>
+
+
+
+                <article class="water-card">
+
+                    <div class="water-card-number">
+                        04
+                    </div>
+
+                    <div class="water-card-icon">
+                        ◈
+                    </div>
+
+                    <h3>
+                        Technologies
+                    </h3>
+
+                    <p>
+                        Filtration, traitement et nouvelles
+                        technologies de gestion de l'eau.
+                    </p>
+
+                    <span class="water-status">
+                        INNOVATION
+                    </span>
+
+                </article>
+
+
+
+                <article class="water-card">
+
+                    <div class="water-card-number">
+                        05
+                    </div>
+
+                    <div class="water-card-icon">
+                        ◈
+                    </div>
+
+                    <h3>
+                        Réglementation
+                    </h3>
+
+                    <p>
+                        Nouvelles normes, politiques publiques
+                        et décisions gouvernementales.
+                    </p>
+
+                    <span class="water-status">
+                        POLITIQUE
+                    </span>
+
+                </article>
+
+
+
+                <article class="water-card">
+
+                    <div class="water-card-number">
+                        06
+                    </div>
+
+                    <div class="water-card-icon">
+                        ◈
+                    </div>
+
+                    <h3>
+                        Entreprises
+                    </h3>
+
+                    <p>
+                        Résultats, investissements et actualités
+                        des entreprises exposées au secteur.
+                    </p>
+
+                    <span class="water-status">
+                        MARCHÉ
+                    </span>
+
+                </article>
+
+            </div>
+
+
+
+            <div class="water-note">
+
+                <div class="water-note-icon">
+                    i
+                </div>
+
+                <div>
+
+                    <strong>
+                        Attention aux faux signaux.
+                    </strong>
+
+                    <p>
+                        Une sécheresse ou une pénurie ne signifie
+                        pas automatiquement qu'une entreprise ou
+                        un ETF lié à l'eau va monter.
+                    </p>
+
+                </div>
+
+            </div>
+
+        </section>
+
+
+
+        <!-- =====================================
+             PREMIUM
+        ====================================== -->
+
+        <section
+            id="premium"
+            class="premium-section"
+        >
+
+            <div class="premium-glow"></div>
+
+
+            <div class="premium-content">
+
+                <div class="premium-badge">
+                    HEXAPULSE PREMIUM
+                </div>
+
+
+                <h2>
+                    Passe de l'information
+                    <span>à l'intelligence.</span>
+                </h2>
+
+
+                <p>
+                    Une vision plus avancée des marchés :
+                    alertes, analyses d'impact, surveillance
+                    personnalisée et outils pour investisseurs.
+                </p>
+
+
+                <!-- =================================
+                     PRIX PREMIUM
+                ================================== -->
+
+                <div class="premium-price">
+
+                    <span class="premium-price-value">
+                        4,99 €
+                    </span>
+
+                    <span class="premium-price-period">
+                        / mois
+                    </span>
+
+                </div>
+
+
+                <div class="premium-price-note">
+                    Sans engagement · Annulation à tout moment
+                </div>
+
+
+                <!-- =================================
+                     FONCTIONNALITÉS
+                ================================== -->
+
+                <div class="premium-features">
+
+                    <div>
+                        <span>✓</span>
+                        Alertes économiques personnalisées
+                    </div>
+
+                    <div>
+                        <span>✓</span>
+                        Analyse avancée des impacts
+                    </div>
+
+                    <div>
+                        <span>✓</span>
+                        Water Intelligence
+                    </div>
+
+                    <div>
+                        <span>✓</span>
+                        Watchlists personnalisées
+                    </div>
+
+                    <div>
+                        <span>✓</span>
+                        Surprise Alerts
+                    </div>
+
+                    <div>
+                        <span>✓</span>
+                        HexaPulse Score avancé
+                    </div>
+
+                </div>
+
+
+                <!-- =================================
+                     BOUTON PREMIUM
+                ================================== -->
+
+                <button
+                    id="premiumButton"
+                    class="premium-button"
+                >
+
+                    Découvrir Premium
+
+                    <span>→</span>
+
+                </button>
+
+
+                <div
+                    id="premiumMessage"
+                    class="premium-message"
+                ></div>
+
+            </div>
+
+        </section>
+
+
+    </main>
+
+
+
+    <!-- =========================================
+         FOOTER
+    ========================================== -->
+
+    <footer>
+
+        <div class="footer-brand">
+
+            <div class="brand-mark small">
+                H
+            </div>
+
+            <div>
+
+                <strong>
+                    HexaPulse
+                </strong>
+
+                <span>
+                    Economic Intelligence
+                </span>
+
+            </div>
+
+        </div>
+
+
+        <div class="footer-right">
+
+            <span>
+                FRANCE · EUROPE
+            </span>
+
+            <span>
+                © 2026 HexaPulse
+            </span>
+
+        </div>
+
+    </footer>
+
+
+
+    <script src="/static/script.js"></script>
+
+</body>
+
+</html>
+```
