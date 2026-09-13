@@ -1,17 +1,34 @@
+"""
+HEXAPULSE BOT
+Synchronisation automatique du calendrier économique.
+
+Fonctions :
+- récupération BiQuote
+- sauvegarde SQLite
+- nettoyage des anciennes données
+- analyse économique
+- détection des alertes
+- anti-doublon
+- synchronisation toutes les 15 minutes
+"""
+
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from data_sources import collect_all_sources
-from intelligence import analyze_event
-
 from database import (
     init_database,
     save_events,
     cleanup_old_events,
-    cleanup_alert_history,
     alert_already_processed,
     save_alert,
+    cleanup_alert_history,
+)
+
+from intelligence import (
+    analyze_event,
+    build_alert_message,
 )
 
 
@@ -21,407 +38,398 @@ from database import (
 
 INTERVAL = 15 * 60
 
-# Fuseau horaire officiel HexaPulse
 PARIS_TZ = ZoneInfo("Europe/Paris")
 
+MIN_ALERT_SCORE = 75
+
 
 # ============================================================
-# CREATION D'UNE ALERTE INTELLIGENTE
+# HEURE
 # ============================================================
 
-def build_alert(event, analysis):
+def paris_now():
+    return datetime.now(PARIS_TZ)
 
-    score = analysis["score"]
-    level = analysis["alert_level"]
 
-    # --------------------------------------------------------
-    # SEULEMENT IMPORTANT ET CRITIQUE
-    # --------------------------------------------------------
+def utc_now():
+    return datetime.now(timezone.utc)
 
-    if level not in {
-        "IMPORTANT",
-        "CRITIQUE",
-    }:
-        return None
 
-    title = event.get(
-        "title",
-        "Annonce économique",
+# ============================================================
+# OUTILS
+# ============================================================
+
+def clean_text(value):
+    if value is None:
+        return ""
+
+    return str(value).strip()
+
+
+def event_key(event, analysis):
+    """
+    Clé logique d'un événement.
+
+    Elle sert à empêcher deux entrées identiques
+    de générer deux alertes.
+    """
+
+    title = clean_text(
+        event.get("title")
+    ).lower()
+
+    event_date = clean_text(
+        event.get("event_date")
     )
 
-    direction = analysis["direction"]
+    category = clean_text(
+        analysis.get("category")
+    ).lower()
 
-    indicator_type = analysis["indicator_type"]
+    country = clean_text(
+        event.get("country")
+        or event.get("country_code")
+        or event.get("countryCode")
+    ).upper()
 
-    assets = analysis["assets"]
-
-    surprise = analysis["surprise"]
-
-    if surprise is None:
-        surprise_text = "N/D"
-    else:
-        surprise_text = f"{surprise:+.2f}"
-
-    assets_text = (
-        ", ".join(assets)
-        if assets
-        else "Marché général"
+    return (
+        title,
+        event_date,
+        category,
+        country,
     )
-
-    message = (
-        f"{title} | "
-        f"{indicator_type} | "
-        f"Score : {score}/100 | "
-        f"Direction : {direction} | "
-        f"Surprise : {surprise_text} | "
-        f"Actifs : {assets_text}"
-    )
-
-    return {
-        "level": level,
-        "message": message,
-    }
 
 
 # ============================================================
-# TRAITEMENT DES ALERTES
+# ANALYSE DES ÉVÉNEMENTS
 # ============================================================
 
-def process_alerts(events):
+def analyze_events(events):
+    analyzed = []
 
-    new_alerts = []
+    print()
+    print("[INTELLIGENCE] Analyse des événements...")
 
     for event in events:
-
         try:
-
-            # Analyse complète de l'événement
             analysis = analyze_event(event)
 
-            # Ajout des informations directement
-            # dans l'événement
-            event["hexapulse_score"] = analysis["score"]
-
-            event["indicator_type"] = (
-                analysis["indicator_type"]
+            event["intelligence_score"] = analysis["score"]
+            event["intelligence_category"] = analysis["category"]
+            event["intelligence_direction"] = analysis["direction"]
+            event["intelligence_monetary_bias"] = (
+                analysis["monetary_bias"]
             )
-
-            event["surprise"] = analysis["surprise"]
-
-            event["direction"] = analysis["direction"]
-
-            event["alert_level"] = (
+            event["intelligence_surprise"] = (
+                analysis["surprise"]
+            )
+            event["intelligence_alert_level"] = (
                 analysis["alert_level"]
             )
-
-            event["market_assets"] = ", ".join(
+            event["intelligence_assets"] = (
                 analysis["assets"]
             )
 
-            # Construction de l'alerte
-            alert = build_alert(
-                event,
-                analysis,
+            analyzed.append(
+                (
+                    event,
+                    analysis,
+                )
             )
-
-            # Pas d'alerte si NORMAL ou SURVEILLER
-            if not alert:
-                continue
-
-            external_id = event.get(
-                "external_id"
-            )
-
-            if not external_id:
-                continue
-
-            # Évite les doublons
-            if alert_already_processed(
-                external_id
-            ):
-                continue
-
-            # Sauvegarde de l'alerte
-            saved = save_alert(
-                external_id,
-                alert["level"],
-                alert["message"],
-            )
-
-            if saved:
-                new_alerts.append(alert)
 
         except Exception as error:
-
             print(
-                "[INTELLIGENCE] "
-                f"Erreur analyse : {error}"
+                "[INTELLIGENCE] Erreur analyse :",
+                error,
             )
 
-    return new_alerts
+    print(
+        f"[INTELLIGENCE] {len(analyzed)} événement(s) analysé(s)."
+    )
+
+    return analyzed
 
 
 # ============================================================
-# AFFICHAGE DES ALERTES
+# ALERTES
 # ============================================================
 
-def display_alerts(alerts):
+def process_alerts(analyzed_events):
+    alerts = []
 
-    if not alerts:
+    # Anti-doublon pendant UNE synchronisation.
+    alert_keys_seen = set()
 
-        print()
-        print(
-            "[ALERT] "
-            "Aucune nouvelle alerte."
+    for event, analysis in analyzed_events:
+
+        score = analysis.get(
+            "score",
+            0,
         )
 
-        return
+        level = analysis.get(
+            "alert_level",
+            "INFO",
+        )
+
+        if score < MIN_ALERT_SCORE:
+            continue
+
+        key = event_key(
+            event,
+            analysis,
+        )
+
+        # Même événement rencontré deux fois
+        # pendant la même synchronisation.
+        if key in alert_keys_seen:
+            continue
+
+        alert_keys_seen.add(key)
+
+        external_id = clean_text(
+            event.get("external_id")
+        )
+
+        # Si l'événement existe déjà dans
+        # l'historique, aucune nouvelle alerte.
+        if external_id and alert_already_processed(
+            external_id
+        ):
+            continue
+
+        message = build_alert_message(
+            event,
+            analysis,
+        )
+
+        if external_id:
+            saved = save_alert(
+                external_id,
+                level,
+                message,
+            )
+
+            if not saved:
+                continue
+
+        alerts.append(
+            {
+                "event": event,
+                "analysis": analysis,
+                "message": message,
+            }
+        )
+
+    return alerts
+
+
+# ============================================================
+# AFFICHAGE
+# ============================================================
+
+def print_alerts(alerts):
 
     print()
     print("=" * 60)
-    print(
-        "🚨 NOUVELLES ALERTES HEXAPULSE"
-    )
+    print("🚨 NOUVELLES ALERTES HEXAPULSE")
     print("=" * 60)
 
-    for alert in alerts[:10]:
-
+    if not alerts:
         print()
+        print("Aucune nouvelle alerte.")
+        return
+
+    print()
+
+    for alert in alerts:
+        event = alert["event"]
+        analysis = alert["analysis"]
+
+        level = analysis["alert_level"]
+        score = analysis["score"]
 
         print(
-            f"[{alert['level']}] "
+            f"[{level}] "
             f"{alert['message']}"
         )
 
     print()
-
     print(
-        f"[ALERT] "
-        f"{len(alerts)} nouvelle(s) "
-        f"alerte(s)."
+        f"[ALERT] {len(alerts)} nouvelle(s) alerte(s)."
     )
 
 
 # ============================================================
-# SYNCHRONISATION HEXAPULSE
+# SYNCHRONISATION
 # ============================================================
 
 def sync_hexapulse():
 
     print()
     print("=" * 60)
-    print(
-        "HEXAPULSE BOT — SYNCHRONISATION"
-    )
+    print("HEXAPULSE BOT — SYNCHRONISATION")
     print("=" * 60)
+    print()
+
+    # --------------------------------------------------------
+    # 1. RÉCUPÉRATION
+    # --------------------------------------------------------
 
     try:
-
-        # ----------------------------------------------------
-        # RECUPERATION DES DONNEES
-        # ----------------------------------------------------
-
         events = collect_all_sources()
 
-        if not events:
+    except Exception as error:
+        print(
+            "[BOT] Erreur récupération données :",
+            error,
+        )
+        return
 
-            print(
-                "[BOT] "
-                "Aucun événement récupéré."
-            )
+    if not events:
+        print(
+            "[BOT] Aucun événement récupéré."
+        )
+        return
 
-            return
+    print(
+        f"[BOT] Événements récupérés : {len(events)}"
+    )
 
-        # ----------------------------------------------------
-        # SAUVEGARDE SQLITE
-        # ----------------------------------------------------
+    # --------------------------------------------------------
+    # 2. SAUVEGARDE
+    # --------------------------------------------------------
 
+    try:
         saved = save_events(events)
 
-        # ----------------------------------------------------
-        # NETTOYAGE
-        # ----------------------------------------------------
+    except Exception as error:
+        print(
+            "[BOT] Erreur sauvegarde :",
+            error,
+        )
+        saved = 0
 
+    print(
+        f"[BOT] Événements enregistrés : {saved}"
+    )
+
+    # --------------------------------------------------------
+    # 3. NETTOYAGE
+    # --------------------------------------------------------
+
+    try:
         cleanup_old_events()
-
         cleanup_alert_history()
 
-        # ----------------------------------------------------
-        # INTELLIGENCE HEXAPULSE
-        # ----------------------------------------------------
-
-        print()
-        print(
-            "[INTELLIGENCE] "
-            "Analyse des événements..."
-        )
-
-        analyzed_count = 0
-
-        for event in events:
-
-            try:
-
-                analysis = analyze_event(event)
-
-                event["hexapulse_score"] = (
-                    analysis["score"]
-                )
-
-                event["indicator_type"] = (
-                    analysis["indicator_type"]
-                )
-
-                event["surprise"] = (
-                    analysis["surprise"]
-                )
-
-                event["direction"] = (
-                    analysis["direction"]
-                )
-
-                event["alert_level"] = (
-                    analysis["alert_level"]
-                )
-
-                analyzed_count += 1
-
-            except Exception as error:
-
-                print(
-                    "[INTELLIGENCE] "
-                    f"Erreur : {error}"
-                )
-
-        print(
-            f"[INTELLIGENCE] "
-            f"{analyzed_count} événement(s) "
-            f"analysé(s)."
-        )
-
-        # ----------------------------------------------------
-        # ALERTES INTELLIGENTES
-        # ----------------------------------------------------
-
-        alerts = process_alerts(events)
-
-        display_alerts(alerts)
-
-        # ----------------------------------------------------
-        # RESUME
-        # ----------------------------------------------------
-
-        # Heure française Europe/Paris
-        now = datetime.now(PARIS_TZ).strftime(
-            "%H:%M:%S"
-        )
-
-        print()
-
-        print(
-            f"[{now}] "
-            "Synchronisation terminée."
-        )
-
-        print(
-            f"[BOT] "
-            f"Événements récupérés : "
-            f"{len(events)}"
-        )
-
-        print(
-            f"[BOT] "
-            f"Événements enregistrés : "
-            f"{saved}"
-        )
-
-        print(
-            f"[BOT] "
-            f"Événements analysés : "
-            f"{analyzed_count}"
-        )
-
-        print(
-            f"[BOT] "
-            f"Nouvelles alertes : "
-            f"{len(alerts)}"
-        )
-
     except Exception as error:
-
-        print()
         print(
-            "[BOT] ERREUR"
+            "[BOT] Erreur nettoyage :",
+            error,
         )
 
-        print(
-            f"[BOT] {error}"
-        )
+    # --------------------------------------------------------
+    # 4. INTELLIGENCE
+    # --------------------------------------------------------
+
+    analyzed = analyze_events(
+        events
+    )
+
+    print(
+        f"[BOT] Événements analysés : {len(analyzed)}"
+    )
+
+    # --------------------------------------------------------
+    # 5. ALERTES
+    # --------------------------------------------------------
+
+    alerts = process_alerts(
+        analyzed
+    )
+
+    print_alerts(
+        alerts
+    )
+
+    # --------------------------------------------------------
+    # 6. HORODATAGE
+    # --------------------------------------------------------
+
+    print()
+    print(
+        f"[{paris_now().strftime('%H:%M:%S')}] "
+        "Synchronisation terminée."
+    )
+
+    print(
+        f"[BOT] Prochaine synchronisation "
+        f"dans {INTERVAL // 60} minutes."
+    )
 
 
 # ============================================================
-# MAIN
+# PROGRAMME PRINCIPAL
 # ============================================================
 
 def main():
 
-    init_database()
-
     print()
     print("=" * 60)
-    print(
-        "🚀 HEXAPULSE BOT DÉMARRÉ"
-    )
+    print("🚀 HEXAPULSE BOT DÉMARRÉ")
     print("=" * 60)
-
     print()
-
     print(
-        "Synchronisation automatique "
-        "toutes les 15 minutes."
+        "Synchronisation automatique toutes les 15 minutes."
     )
-
     print(
         "Fuseau horaire : Europe/Paris"
     )
-
     print(
         "CTRL+C pour arrêter."
     )
-
     print()
+    print("=" * 60)
+
+    init_database()
 
     while True:
 
-        sync_hexapulse()
-
-        print()
-
-        print(
-            "[BOT] Prochaine synchronisation "
-            "dans 15 minutes."
-        )
-
-        print()
-
         try:
-
-            time.sleep(INTERVAL)
+            sync_hexapulse()
 
         except KeyboardInterrupt:
-
             print()
-
             print(
                 "🛑 HEXAPULSE BOT ARRÊTÉ."
             )
-
             break
 
+        except Exception as error:
+            print()
+            print(
+                "[BOT] Erreur générale :",
+                error,
+            )
+            print(
+                "[BOT] Nouvelle tentative dans 60 secondes."
+            )
 
-# ============================================================
-# LANCEMENT
-# ============================================================
+            time.sleep(60)
+            continue
+
+        try:
+            time.sleep(
+                INTERVAL
+            )
+
+        except KeyboardInterrupt:
+            print()
+            print(
+                "🛑 HEXAPULSE BOT ARRÊTÉ."
+            )
+            break
+
 
 if __name__ == "__main__":
     main()

@@ -1,60 +1,137 @@
-from datetime import datetime
+"""
+HEXAPULSE — MOTEUR D'INTELLIGENCE ÉCONOMIQUE
+
+Analyse les annonces économiques et produit :
+- catégorie
+- score d'importance
+- surprise
+- direction potentielle
+- actifs concernés
+- niveau d'alerte
+"""
+
+import re
 
 
 # ============================================================
-# HEXAPULSE INTELLIGENCE ENGINE
+# MOTS-CLÉS PAR CATÉGORIE
 # ============================================================
 
-IMPACT_SCORES = {
-    "FAIBLE": 25,
-    "MOYEN": 55,
-    "FORT": 80,
+CATEGORY_KEYWORDS = {
+    "TAUX": [
+        "interest rate",
+        "interest rates",
+        "policy rate",
+        "deposit facility",
+        "refinancing rate",
+        "fed rate",
+        "federal funds",
+        "rate decision",
+        "central bank",
+        "ecb",
+        "fomc",
+        "bank rate",
+        "cash rate",
+    ],
+    "INFLATION": [
+        "cpi",
+        "inflation",
+        "hicp",
+        "consumer price",
+        "consumer prices",
+        "pce",
+        "core inflation",
+        "harmonised inflation",
+    ],
+    "EMPLOI": [
+        "employment",
+        "unemployment",
+        "nonfarm payroll",
+        "payroll",
+        "jobs",
+        "jobless",
+        "initial claims",
+        "employment change",
+        "wage",
+        "earnings",
+    ],
+    "CROISSANCE": [
+        "gdp",
+        "gross domestic product",
+        "economic growth",
+        "growth rate",
+        "industrial production",
+        "retail sales",
+        "production",
+    ],
+    "ACTIVITÉ": [
+        "pmi",
+        "manufacturing pmi",
+        "services pmi",
+        "composite pmi",
+        "business confidence",
+        "consumer confidence",
+        "economic sentiment",
+        "ism",
+    ],
+    "COMMERCE": [
+        "trade balance",
+        "trade balance",
+        "exports",
+        "imports",
+        "current account",
+    ],
 }
 
 
 # ============================================================
-# NORMALISATION
+# ACTIFS PAR ZONE
 # ============================================================
 
-def normalize_impact(impact):
-
-    value = str(
-        impact or ""
-    ).lower().strip()
-
-    if value in {
-        "high",
-        "fort",
-        "forte",
-        "3",
-        "3.0",
-        "red",
-    }:
-        return "FORT"
-
-    if value in {
-        "medium",
-        "moyen",
-        "moyenne",
-        "2",
-        "2.0",
-        "orange",
-    }:
-        return "MOYEN"
-
-    return "FAIBLE"
+ASSETS_BY_COUNTRY = {
+    "FR": ["EUR/USD", "CAC 40", "S&P 500", "Obligations"],
+    "DE": ["EUR/USD", "DAX", "S&P 500", "Obligations"],
+    "IT": ["EUR/USD", "FTSE MIB", "S&P 500", "Obligations"],
+    "ES": ["EUR/USD", "IBEX 35", "S&P 500", "Obligations"],
+    "BE": ["EUR/USD", "CAC 40", "S&P 500", "Obligations"],
+    "NL": ["EUR/USD", "AEX", "S&P 500", "Obligations"],
+    "PT": ["EUR/USD", "PSI 20", "S&P 500", "Obligations"],
+    "IE": ["EUR/USD", "EUR/USD", "S&P 500", "Obligations"],
+    "AT": ["EUR/USD", "ATX", "S&P 500", "Obligations"],
+    "GR": ["EUR/USD", "ATHEX", "S&P 500", "Obligations"],
+    "FI": ["EUR/USD", "OMX Helsinki", "S&P 500", "Obligations"],
+    "SE": ["EUR/SEK", "OMX Stockholm", "S&P 500", "Obligations"],
+    "DK": ["EUR/DKK", "OMX Copenhagen", "S&P 500", "Obligations"],
+    "NO": ["EUR/NOK", "OSEBX", "Brent", "Obligations"],
+    "CH": ["EUR/CHF", "SMI", "S&P 500", "Obligations"],
+    "GB": ["GBP/USD", "FTSE 100", "S&P 500", "Obligations"],
+    "EU": ["EUR/USD", "CAC 40", "DAX", "S&P 500", "Obligations"],
+}
 
 
 # ============================================================
-# CONVERSION DES NOMBRES
+# OUTILS
 # ============================================================
 
-def parse_number(value):
+def clean_text(value):
+    if value is None:
+        return ""
 
+    return str(value).strip()
+
+
+def normalize_number(value):
+    """
+    Transforme différentes formes de nombres en float.
+    Exemples :
+    2.50
+    2,50
+    2.5%
+    """
     if value is None:
         return None
 
-    text = str(value).strip()
+    text = clean_text(value)
 
     if not text:
         return None
@@ -62,519 +139,263 @@ def parse_number(value):
     text = text.replace("%", "")
     text = text.replace(",", ".")
 
+    # Supprime les espaces
+    text = text.replace(" ", "")
+
     try:
         return float(text)
-
     except ValueError:
         return None
+
+
+# ============================================================
+# CATÉGORIE
+# ============================================================
+
+def detect_category(event):
+    title = clean_text(event.get("title")).lower()
+    description = clean_text(event.get("description")).lower()
+
+    text = f"{title} {description}"
+
+    for category, keywords in CATEGORY_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword in text:
+                return category
+
+    return "AUTRE"
+
+
+# ============================================================
+# IMPORTANCE DE BASE
+# ============================================================
+
+def base_score(event, category):
+    impact = clean_text(event.get("impact")).upper()
+
+    score = 20
+
+    if impact == "FORT":
+        score += 45
+    elif impact == "MOYEN":
+        score += 25
+    elif impact == "FAIBLE":
+        score += 10
+
+    important_categories = {
+        "TAUX": 25,
+        "INFLATION": 20,
+        "EMPLOI": 20,
+        "CROISSANCE": 15,
+        "ACTIVITÉ": 10,
+        "COMMERCE": 8,
+        "AUTRE": 0,
+    }
+
+    score += important_categories.get(category, 0)
+
+    title = clean_text(event.get("title")).lower()
+
+    high_impact_words = [
+        "central bank",
+        "ecb",
+        "fed",
+        "fomc",
+        "interest rate",
+        "rate decision",
+        "president",
+        "lagarde",
+        "powell",
+        "nonfarm",
+        "payroll",
+    ]
+
+    if any(word in title for word in high_impact_words):
+        score += 10
+
+    return min(score, 100)
 
 
 # ============================================================
 # SURPRISE
 # ============================================================
 
-def calculate_surprise(event):
+def calculate_surprise(actual, forecast):
+    actual_value = normalize_number(actual)
+    forecast_value = normalize_number(forecast)
 
-    actual = parse_number(
-        event.get("actual")
-    )
-
-    forecast = parse_number(
-        event.get("forecast")
-    )
-
-    if actual is None or forecast is None:
+    if actual_value is None or forecast_value is None:
         return None
 
-    return actual - forecast
+    return actual_value - forecast_value
 
 
-# ============================================================
-# SCORE DE SURPRISE
-# ============================================================
-
-def calculate_surprise_score(surprise):
-
-    if surprise is None:
-        return 0
-
-    absolute = abs(
-        surprise
-    )
-
-    if absolute >= 5:
-        return 20
-
-    if absolute >= 2:
-        return 15
-
-    if absolute >= 1:
-        return 10
-
-    if absolute >= 0.5:
-        return 5
-
-    return 0
-
-
-# ============================================================
-# TYPE D'INDICATEUR
-# ============================================================
-
-def detect_indicator_type(title):
-
-    text = str(
-        title or ""
-    ).lower()
-
-    if any(
-        word in text
-        for word in [
-            "inflation",
-            "cpi",
-            "hicp",
-            "consumer price"
-        ]
-    ):
-        return "INFLATION"
-
-    if any(
-        word in text
-        for word in [
-            "interest rate",
-            "rate decision",
-            "central bank",
-            "ecb",
-            "fed",
-            "boe",
-            "snb"
-        ]
-    ):
-        return "TAUX"
-
-    if any(
-        word in text
-        for word in [
-            "gdp",
-            "gross domestic"
-        ]
-    ):
-        return "CROISSANCE"
-
-    if any(
-        word in text
-        for word in [
-            "employment",
-            "unemployment",
-            "payroll",
-            "job",
-            "jobs",
-            "wage"
-        ]
-    ):
-        return "EMPLOI"
-
-    if any(
-        word in text
-        for word in [
-            "pmi",
-            "manufacturing",
-            "services",
-            "industrial"
-        ]
-    ):
-        return "ACTIVITE"
-
-    if any(
-        word in text
-        for word in [
-            "retail sales",
-            "consumer",
-            "confidence"
-        ]
-    ):
-        return "CONSOMMATION"
-
-    if any(
-        word in text
-        for word in [
-            "speech",
-            "president",
-            "governor",
-            "official"
-        ]
-    ):
-        return "BANQUE_CENTRALE"
-
-    return "AUTRE"
-
-
-# ============================================================
-# DIRECTION ECONOMIQUE
-# ============================================================
-
-def determine_direction(
-    event,
-    indicator_type,
-    surprise
-):
-
+def surprise_direction(category, surprise):
     if surprise is None:
         return "NEUTRE"
 
-    title = str(
-        event.get("title", "")
-    ).lower()
+    if abs(surprise) < 0.000001:
+        return "NEUTRE"
 
-    # --------------------------------------------------------
-    # INFLATION
-    # --------------------------------------------------------
+    # Inflation plus élevée que prévu :
+    # généralement plus hawkish / pression sur les taux.
+    if category == "INFLATION":
+        return "HAUSSE" if surprise > 0 else "BAISSE"
 
-    if indicator_type == "INFLATION":
+    # Emploi :
+    # plus fort = généralement positif pour la monnaie.
+    if category == "EMPLOI":
+        return "HAUSSE" if surprise > 0 else "BAISSE"
 
+    # Croissance :
+    if category in ("CROISSANCE", "ACTIVITÉ"):
+        return "HAUSSE" if surprise > 0 else "BAISSE"
+
+    return "HAUSSE" if surprise > 0 else "BAISSE"
+
+
+# ============================================================
+# DIRECTION MONÉTAIRE
+# ============================================================
+
+def monetary_bias(event, category, surprise):
+    title = clean_text(event.get("title")).lower()
+
+    if category != "TAUX":
+        return "NEUTRE"
+
+    # Décisions de taux
+    if surprise is not None:
         if surprise > 0:
-            return "HAUSSIER"
-
+            return "HAWKISH"
         if surprise < 0:
-            return "BAISSIER"
+            return "DOVISH"
 
-    # --------------------------------------------------------
-    # CROISSANCE
-    # --------------------------------------------------------
-
-    if indicator_type == "CROISSANCE":
-
-        if surprise > 0:
-            return "HAUSSIER"
-
-        if surprise < 0:
-            return "BAISSIER"
-
-    # --------------------------------------------------------
-    # EMPLOI
-    # --------------------------------------------------------
-
-    if indicator_type == "EMPLOI":
-
-        if "unemployment" in title:
-
-            if surprise < 0:
-                return "HAUSSIER"
-
-            if surprise > 0:
-                return "BAISSIER"
-
-        if surprise > 0:
-            return "HAUSSIER"
-
-        if surprise < 0:
-            return "BAISSIER"
-
-    # --------------------------------------------------------
-    # ACTIVITE
-    # --------------------------------------------------------
-
-    if indicator_type == "ACTIVITE":
-
-        if surprise > 0:
-            return "HAUSSIER"
-
-        if surprise < 0:
-            return "BAISSIER"
-
-    # --------------------------------------------------------
-    # CONSOMMATION
-    # --------------------------------------------------------
-
-    if indicator_type == "CONSOMMATION":
-
-        if surprise > 0:
-            return "HAUSSIER"
-
-        if surprise < 0:
-            return "BAISSIER"
+    # Discours de banques centrales :
+    # impossible de déduire honnêtement le ton sans le texte.
+    if any(
+        word in title
+        for word in [
+            "speech",
+            "speaks",
+            "remarks",
+            "statement",
+            "press conference",
+        ]
+    ):
+        return "NEUTRE"
 
     return "NEUTRE"
 
 
 # ============================================================
-# ACTIFS CONCERNES
+# ACTIFS
 # ============================================================
 
-def detect_assets(event, indicator_type):
-
-    country = str(
-        event.get("country", "")
+def detect_assets(event):
+    country = clean_text(
+        event.get("country_code")
+        or event.get("countryCode")
+        or event.get("country")
     ).upper()
 
-    currency = str(
-        event.get("currency", "")
-    ).upper()
+    assets = ASSETS_BY_COUNTRY.get(country)
 
-    assets = []
+    if assets:
+        # Supprime les doublons en conservant l'ordre
+        return list(dict.fromkeys(assets))
 
-    # --------------------------------------------------------
-    # EUROPE
-    # --------------------------------------------------------
-
-    if country in {
-        "FR",
-        "DE",
-        "IT",
-        "ES",
-        "BE",
-        "NL",
-        "PT",
-        "IE",
-        "AT",
-        "FI",
-        "GR",
-    } or country == "EU":
-
-        assets.extend([
-            "EUR/USD",
-            "CAC 40"
-        ])
-
-    # --------------------------------------------------------
-    # SUISSE
-    # --------------------------------------------------------
-
-    if country == "CH":
-
-        assets.extend([
-            "USD/CHF",
-            "EUR/CHF",
-            "S&P 500"
-        ])
-
-    # --------------------------------------------------------
-    # ROYAUME-UNI
-    # --------------------------------------------------------
-
-    if country == "GB":
-
-        assets.extend([
-            "GBP/USD",
-            "FTSE 100"
-        ])
-
-    # --------------------------------------------------------
-    # IMPACT BANQUE CENTRALE
-    # --------------------------------------------------------
-
-    if indicator_type in {
-        "TAUX",
-        "BANQUE_CENTRALE"
-    }:
-
-        assets.extend([
-            "EUR/USD",
-            "S&P 500",
-            "Obligations"
-        ])
-
-    # --------------------------------------------------------
-    # SUPPRESSION DOUBLONS
-    # --------------------------------------------------------
-
-    return list(
-        dict.fromkeys(
-            assets
-        )
-    )
+    return ["EUR/USD", "S&P 500", "Obligations"]
 
 
 # ============================================================
 # NIVEAU D'ALERTE
 # ============================================================
 
-def determine_alert_level(score):
-
+def alert_level(score):
     if score >= 90:
         return "CRITIQUE"
 
-    if score >= 70:
+    if score >= 75:
         return "IMPORTANT"
 
-    if score >= 45:
-        return "SURVEILLER"
+    if score >= 55:
+        return "SURVEILLANCE"
 
-    return "NORMAL"
-
-
-# ============================================================
-# MESSAGE INTELLIGENT
-# ============================================================
-
-def build_message(
-    event,
-    indicator_type,
-    direction,
-    surprise,
-    score
-):
-
-    title = event.get(
-        "title",
-        "Annonce économique"
-    )
-
-    if surprise is not None:
-
-        surprise_text = (
-            f"{surprise:+.2f}"
-        )
-
-    else:
-
-        surprise_text = "N/D"
-
-    return (
-        f"{title} | "
-        f"{indicator_type} | "
-        f"Surprise : {surprise_text} | "
-        f"Direction : {direction} | "
-        f"Score : {score}/100"
-    )
+    return "INFO"
 
 
 # ============================================================
-# ANALYSE COMPLETE
+# ANALYSE PRINCIPALE
 # ============================================================
 
 def analyze_event(event):
+    category = detect_category(event)
 
-    impact = normalize_impact(
-        event.get("impact")
-    )
+    score = base_score(event, category)
 
-    indicator_type = (
-        detect_indicator_type(
-            event.get("title")
-        )
-    )
+    actual = event.get("actual")
+    forecast = event.get("forecast")
 
-    surprise = calculate_surprise(
-        event
-    )
+    surprise = calculate_surprise(actual, forecast)
 
-    base_score = IMPACT_SCORES.get(
-        impact,
-        25
-    )
+    if surprise is not None:
+        # Une surprise mesurable augmente l'intérêt de l'événement.
+        score += 10
 
-    surprise_score = (
-        calculate_surprise_score(
-            surprise
-        )
-    )
-
-    score = min(
-        100,
-        base_score + surprise_score
-    )
-
-    direction = (
-        determine_direction(
-            event,
-            indicator_type,
-            surprise
-        )
-    )
-
-    assets = detect_assets(
-        event,
-        indicator_type
-    )
-
-    alert_level = (
-        determine_alert_level(
-            score
-        )
-    )
-
-    message = build_message(
-        event,
-        indicator_type,
-        direction,
+    direction = surprise_direction(
+        category,
         surprise,
-        score
     )
+
+    monetary = monetary_bias(
+        event,
+        category,
+        surprise,
+    )
+
+    assets = detect_assets(event)
+
+    level = alert_level(score)
 
     return {
-        "score": score,
-        "impact": impact,
-        "indicator_type": indicator_type,
-        "surprise": surprise,
+        "category": category,
+        "score": min(score, 100),
         "direction": direction,
+        "monetary_bias": monetary,
+        "surprise": surprise,
+        "alert_level": level,
         "assets": assets,
-        "alert_level": alert_level,
-        "message": message,
-        "analyzed_at": datetime.utcnow().isoformat()
     }
 
 
 # ============================================================
-# TEST DIRECT
+# MESSAGE D'ALERTE
 # ============================================================
+
+def build_alert_message(event, analysis):
+    title = clean_text(event.get("title")) or "Événement économique"
+
+    category = analysis["category"]
+    score = analysis["score"]
+    direction = analysis["direction"]
+    surprise = analysis["surprise"]
+    assets = ", ".join(analysis["assets"])
+
+    if surprise is None:
+        surprise_text = "N/D"
+    else:
+        surprise_text = f"{surprise:+.4f}"
+
+    return (
+        f"{title} | "
+        f"{category} | "
+        f"Score : {score}/100 | "
+        f"Direction : {direction} | "
+        f"Surprise : {surprise_text} | "
+        f"Actifs : {assets}"
+    )
+
 
 if __name__ == "__main__":
-
-    print()
-    print("=" * 60)
-    print("HEXAPULSE INTELLIGENCE ENGINE")
-    print("=" * 60)
-    print()
-
-    test_event = {
-        "title": "Inflation Rate YoY",
-        "country": "FR",
-        "currency": "EUR",
-        "impact": "high",
-        "actual": "2.8",
-        "forecast": "2.3",
-        "previous": "2.5"
-    }
-
-    result = analyze_event(
-        test_event
-    )
-
-    print(
-        f"Score : "
-        f"{result['score']}/100"
-    )
-
-    print(
-        f"Type : "
-        f"{result['indicator_type']}"
-    )
-
-    print(
-        f"Surprise : "
-        f"{result['surprise']}"
-    )
-
-    print(
-        f"Direction : "
-        f"{result['direction']}"
-    )
-
-    print(
-        f"Niveau : "
-        f"{result['alert_level']}"
-    )
-
-    print(
-        f"Actifs : "
-        f"{', '.join(result['assets'])}"
-    )
-
-    print()
-
-    print(
-        result["message"]
-    )
-
-    print()
+    print("HexaPulse Intelligence Engine OK")
