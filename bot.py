@@ -1,7 +1,9 @@
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from data_sources import collect_all_sources
+from intelligence import analyze_event
 
 from database import (
     init_database,
@@ -9,7 +11,7 @@ from database import (
     cleanup_old_events,
     cleanup_alert_history,
     alert_already_processed,
-    save_alert
+    save_alert,
 )
 
 
@@ -19,163 +21,66 @@ from database import (
 
 INTERVAL = 15 * 60
 
-
-# ============================================================
-# NORMALISATION DE L'IMPACT
-# ============================================================
-
-def normalize_impact(impact):
-
-    value = str(
-        impact or ""
-    ).lower().strip()
-
-    if value in [
-        "high",
-        "fort",
-        "forte",
-        "3",
-        "3.0",
-        "red"
-    ]:
-        return "FORT"
-
-    if value in [
-        "medium",
-        "moyen",
-        "moyenne",
-        "2",
-        "2.0",
-        "orange"
-    ]:
-        return "MOYEN"
-
-    return "FAIBLE"
+# Fuseau horaire officiel HexaPulse
+PARIS_TZ = ZoneInfo("Europe/Paris")
 
 
 # ============================================================
-# CONVERSION DES NOMBRES
+# CREATION D'UNE ALERTE INTELLIGENTE
 # ============================================================
 
-def parse_number(value):
+def build_alert(event, analysis):
 
-    if value is None:
+    score = analysis["score"]
+    level = analysis["alert_level"]
+
+    # --------------------------------------------------------
+    # SEULEMENT IMPORTANT ET CRITIQUE
+    # --------------------------------------------------------
+
+    if level not in {
+        "IMPORTANT",
+        "CRITIQUE",
+    }:
         return None
-
-    text = str(
-        value
-    ).strip()
-
-    if not text:
-        return None
-
-    text = text.replace(
-        "%",
-        ""
-    )
-
-    text = text.replace(
-        ",",
-        "."
-    )
-
-    try:
-
-        return float(text)
-
-    except ValueError:
-
-        return None
-
-
-# ============================================================
-# CALCUL DE LA SURPRISE
-# ============================================================
-
-def calculate_surprise(event):
-
-    actual = parse_number(
-        event.get("actual")
-    )
-
-    forecast = parse_number(
-        event.get("forecast")
-    )
-
-    if actual is None or forecast is None:
-        return None
-
-    return actual - forecast
-
-
-# ============================================================
-# DETECTION D'UNE ALERTE
-# ============================================================
-
-def detect_alert(event):
-
-    impact = normalize_impact(
-        event.get("impact")
-    )
-
-    surprise = calculate_surprise(
-        event
-    )
 
     title = event.get(
         "title",
-        "Annonce économique"
+        "Annonce économique",
     )
 
-    # --------------------------------------------------------
-    # IMPACT FORT
-    # --------------------------------------------------------
+    direction = analysis["direction"]
 
-    if impact == "FORT":
+    indicator_type = analysis["indicator_type"]
 
-        if surprise is not None:
+    assets = analysis["assets"]
 
-            if abs(surprise) >= 1:
+    surprise = analysis["surprise"]
 
-                return {
-                    "level": "CRITIQUE",
+    if surprise is None:
+        surprise_text = "N/D"
+    else:
+        surprise_text = f"{surprise:+.2f}"
 
-                    "message": (
-                        f"{title} | "
-                        f"Impact FORT | "
-                        f"Surprise : "
-                        f"{surprise:+.2f}"
-                    )
-                }
+    assets_text = (
+        ", ".join(assets)
+        if assets
+        else "Marché général"
+    )
 
-        return {
-            "level": "FORT",
+    message = (
+        f"{title} | "
+        f"{indicator_type} | "
+        f"Score : {score}/100 | "
+        f"Direction : {direction} | "
+        f"Surprise : {surprise_text} | "
+        f"Actifs : {assets_text}"
+    )
 
-            "message": (
-                f"{title} | "
-                f"Impact FORT"
-            )
-        }
-
-    # --------------------------------------------------------
-    # SURPRISE IMPORTANTE
-    # --------------------------------------------------------
-
-    if surprise is not None:
-
-        if abs(surprise) >= 2:
-
-            return {
-                "level": "SURPRISE",
-
-                "message": (
-                    f"{title} | "
-                    f"Surprise importante : "
-                    f"{surprise:+.2f}"
-                )
-            }
-
-    return None
+    return {
+        "level": level,
+        "message": message,
+    }
 
 
 # ============================================================
@@ -188,51 +93,76 @@ def process_alerts(events):
 
     for event in events:
 
-        alert = detect_alert(
-            event
-        )
+        try:
 
-        if not alert:
-            continue
+            # Analyse complète de l'événement
+            analysis = analyze_event(event)
 
-        external_id = event.get(
-            "external_id"
-        )
+            # Ajout des informations directement
+            # dans l'événement
+            event["hexapulse_score"] = analysis["score"]
 
-        if not external_id:
-            continue
+            event["indicator_type"] = (
+                analysis["indicator_type"]
+            )
 
-        # ----------------------------------------------------
-        # VERIFICATION DOUBLON
-        # ----------------------------------------------------
+            event["surprise"] = analysis["surprise"]
 
-        if alert_already_processed(
-            external_id
-        ):
+            event["direction"] = analysis["direction"]
 
-            continue
+            event["alert_level"] = (
+                analysis["alert_level"]
+            )
 
-        # ----------------------------------------------------
-        # ENREGISTREMENT
-        # ----------------------------------------------------
+            event["market_assets"] = ", ".join(
+                analysis["assets"]
+            )
 
-        saved = save_alert(
-            external_id,
-            alert["level"],
-            alert["message"]
-        )
+            # Construction de l'alerte
+            alert = build_alert(
+                event,
+                analysis,
+            )
 
-        if saved:
+            # Pas d'alerte si NORMAL ou SURVEILLER
+            if not alert:
+                continue
 
-            new_alerts.append(
-                alert
+            external_id = event.get(
+                "external_id"
+            )
+
+            if not external_id:
+                continue
+
+            # Évite les doublons
+            if alert_already_processed(
+                external_id
+            ):
+                continue
+
+            # Sauvegarde de l'alerte
+            saved = save_alert(
+                external_id,
+                alert["level"],
+                alert["message"],
+            )
+
+            if saved:
+                new_alerts.append(alert)
+
+        except Exception as error:
+
+            print(
+                "[INTELLIGENCE] "
+                f"Erreur analyse : {error}"
             )
 
     return new_alerts
 
 
 # ============================================================
-# AFFICHAGE DES NOUVELLES ALERTES
+# AFFICHAGE DES ALERTES
 # ============================================================
 
 def display_alerts(alerts):
@@ -249,7 +179,9 @@ def display_alerts(alerts):
 
     print()
     print("=" * 60)
-    print("🚨 NOUVELLES ALERTES HEXAPULSE")
+    print(
+        "🚨 NOUVELLES ALERTES HEXAPULSE"
+    )
     print("=" * 60)
 
     for alert in alerts[:10]:
@@ -278,7 +210,9 @@ def sync_hexapulse():
 
     print()
     print("=" * 60)
-    print("HEXAPULSE BOT — SYNCHRONISATION")
+    print(
+        "HEXAPULSE BOT — SYNCHRONISATION"
+    )
     print("=" * 60)
 
     try:
@@ -299,12 +233,10 @@ def sync_hexapulse():
             return
 
         # ----------------------------------------------------
-        # SAUVEGARDE DES EVENEMENTS
+        # SAUVEGARDE SQLITE
         # ----------------------------------------------------
 
-        saved = save_events(
-            events
-        )
+        saved = save_events(events)
 
         # ----------------------------------------------------
         # NETTOYAGE
@@ -315,22 +247,72 @@ def sync_hexapulse():
         cleanup_alert_history()
 
         # ----------------------------------------------------
-        # TRAITEMENT DES ALERTES
+        # INTELLIGENCE HEXAPULSE
         # ----------------------------------------------------
 
-        alerts = process_alerts(
-            events
+        print()
+        print(
+            "[INTELLIGENCE] "
+            "Analyse des événements..."
         )
 
-        display_alerts(
-            alerts
+        analyzed_count = 0
+
+        for event in events:
+
+            try:
+
+                analysis = analyze_event(event)
+
+                event["hexapulse_score"] = (
+                    analysis["score"]
+                )
+
+                event["indicator_type"] = (
+                    analysis["indicator_type"]
+                )
+
+                event["surprise"] = (
+                    analysis["surprise"]
+                )
+
+                event["direction"] = (
+                    analysis["direction"]
+                )
+
+                event["alert_level"] = (
+                    analysis["alert_level"]
+                )
+
+                analyzed_count += 1
+
+            except Exception as error:
+
+                print(
+                    "[INTELLIGENCE] "
+                    f"Erreur : {error}"
+                )
+
+        print(
+            f"[INTELLIGENCE] "
+            f"{analyzed_count} événement(s) "
+            f"analysé(s)."
         )
 
         # ----------------------------------------------------
-        # RAPPORT
+        # ALERTES INTELLIGENTES
         # ----------------------------------------------------
 
-        now = datetime.now().strftime(
+        alerts = process_alerts(events)
+
+        display_alerts(alerts)
+
+        # ----------------------------------------------------
+        # RESUME
+        # ----------------------------------------------------
+
+        # Heure française Europe/Paris
+        now = datetime.now(PARIS_TZ).strftime(
             "%H:%M:%S"
         )
 
@@ -338,7 +320,7 @@ def sync_hexapulse():
 
         print(
             f"[{now}] "
-            f"Synchronisation terminée."
+            "Synchronisation terminée."
         )
 
         print(
@@ -351,6 +333,12 @@ def sync_hexapulse():
             f"[BOT] "
             f"Événements enregistrés : "
             f"{saved}"
+        )
+
+        print(
+            f"[BOT] "
+            f"Événements analysés : "
+            f"{analyzed_count}"
         )
 
         print(
@@ -372,7 +360,7 @@ def sync_hexapulse():
 
 
 # ============================================================
-# PROGRAMME PRINCIPAL
+# MAIN
 # ============================================================
 
 def main():
@@ -381,7 +369,9 @@ def main():
 
     print()
     print("=" * 60)
-    print("🚀 HEXAPULSE BOT DÉMARRÉ")
+    print(
+        "🚀 HEXAPULSE BOT DÉMARRÉ"
+    )
     print("=" * 60)
 
     print()
@@ -389,6 +379,10 @@ def main():
     print(
         "Synchronisation automatique "
         "toutes les 15 minutes."
+    )
+
+    print(
+        "Fuseau horaire : Europe/Paris"
     )
 
     print(
@@ -412,13 +406,12 @@ def main():
 
         try:
 
-            time.sleep(
-                INTERVAL
-            )
+            time.sleep(INTERVAL)
 
         except KeyboardInterrupt:
 
             print()
+
             print(
                 "🛑 HEXAPULSE BOT ARRÊTÉ."
             )
@@ -431,5 +424,4 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
-
     main()

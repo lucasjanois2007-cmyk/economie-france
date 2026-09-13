@@ -1,32 +1,105 @@
-// ============================================================
-// HEXAPULSE — SCRIPT PRINCIPAL
-// ============================================================
-
 const CONFIG = {
-    apiUrl: "/api/annonces",
-    alertsUrl: "/api/alerts",
-    timezone: "Europe/Paris",
-    liveWindowMinutes: 30,
-    statusRefreshMs: 60 * 1000,
-    alertsRefreshMs: 60 * 1000
+    API_URL: "/api/annonces",
+    ALERTS_URL: "/api/alerts",
+    TIMEZONE: "Europe/Paris"
 };
 
-let events = [];
-
-let filters = {
-    country: "ALL",
-    impact: "ALL",
-    search: ""
-};
+let allEvents = [];
+let currentFilter = "all";
 
 
 // ============================================================
-// OUTILS
+// NETTOYAGE DES TEXTES
+// ============================================================
+
+function cleanText(value) {
+    if (value === null || value === undefined) {
+        return "";
+    }
+
+    let text = String(value);
+
+    // Décodage des entités HTML
+    const textarea = document.createElement("textarea");
+
+    for (let i = 0; i < 3; i++) {
+        textarea.innerHTML = text;
+        const decoded = textarea.value;
+
+        if (decoded === text) {
+            break;
+        }
+
+        text = decoded;
+    }
+
+    // Suppression Markdown parasite
+    text = text.replace(/\*\*/g, "");
+    text = text.replace(/__/g, "");
+    text = text.replace(/`/g, "");
+
+    // Suppression des backslashes parasites
+    text = text.replace(/\\/g, "");
+
+    // Nettoyage des espaces
+    text = text.replace(/\s+/g, " ").trim();
+
+    return text;
+}
+
+
+// ============================================================
+// NETTOYAGE SPECIAL DES ALERTES
+// ============================================================
+
+function cleanAlertMessage(message) {
+    let text = cleanText(message);
+
+    // Correction des anciens messages corrompus du type :
+    // ECB President Lagarde Speech -CB President Lagarde Speech
+    // ECB President Lagarde Speech ECB President Lagarde Speech
+    const titleMatch = text.match(/^(.+?)\s*\|\s*(.+)$/);
+
+    if (titleMatch) {
+        let title = titleMatch[1].trim();
+        let rest = titleMatch[2].trim();
+
+        // Si le début du deuxième morceau répète le titre
+        if (rest.includes(title)) {
+            rest = rest.replace(title, "").trim();
+        }
+
+        // Correction d'un éventuel "CB" / "-CB" parasite
+        if (
+            title.toLowerCase().includes("lagarde") &&
+            rest.startsWith("CB President")
+        ) {
+            rest = rest.replace(/^CB President\s+Lagarde\s+Speech\s*\|?\s*/i, "");
+        }
+
+        text = `${title} | ${rest}`;
+    }
+
+    // Cas spécifique d'un titre répété avant le premier "|"
+    const duplicatePattern = /^(.+?)\s+\1\s*\|/i;
+
+    if (duplicatePattern.test(text)) {
+        text = text.replace(
+            duplicatePattern,
+            "$1 |"
+        );
+    }
+
+    return text.trim();
+}
+
+
+// ============================================================
+// ESCAPE HTML
 // ============================================================
 
 function escapeHtml(value) {
-
-    return String(value ?? "")
+    return cleanText(value)
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
@@ -35,61 +108,40 @@ function escapeHtml(value) {
 }
 
 
-function displayValue(value) {
+// ============================================================
+// IMPACT
+// ============================================================
+
+function normalizeImpact(impact) {
+    const value = cleanText(impact).toLowerCase();
 
     if (
-        value === null ||
-        value === undefined ||
-        value === ""
+        value === "high" ||
+        value === "fort" ||
+        value === "forte"
     ) {
-        return "—";
+        return "FORT";
     }
 
-    return escapeHtml(value);
+    if (
+        value === "medium" ||
+        value === "moyen" ||
+        value === "moyenne"
+    ) {
+        return "MOYEN";
+    }
+
+    return "FAIBLE";
 }
-
-
-function normalizeImpact(value) {
-
-    const text = String(
-        value || ""
-    ).toLowerCase().trim();
-
-    if (
-        text === "fort" ||
-        text === "forte" ||
-        text === "high" ||
-        text === "3" ||
-        text === "3.0"
-    ) {
-        return "Fort";
-    }
-
-    if (
-        text === "moyen" ||
-        text === "moyenne" ||
-        text === "medium" ||
-        text === "2" ||
-        text === "2.0"
-    ) {
-        return "Moyen";
-    }
-
-    return "Faible";
-}
-
 
 function getImpactClass(impact) {
+    const normalized = normalizeImpact(impact);
 
-    const normalized = normalizeImpact(
-        impact
-    );
-
-    if (normalized === "Fort") {
+    if (normalized === "FORT") {
         return "impact-high";
     }
 
-    if (normalized === "Moyen") {
+    if (normalized === "MOYEN") {
         return "impact-medium";
     }
 
@@ -97,11 +149,17 @@ function getImpactClass(impact) {
 }
 
 
-function getCountry(event) {
+// ============================================================
+// PAYS
+// ============================================================
 
-    return String(
-        event?.country || "—"
-    ).toUpperCase();
+function getCountry(event) {
+    return cleanText(
+        event.country ||
+        event.country_code ||
+        event.region ||
+        "EU"
+    );
 }
 
 
@@ -109,7 +167,12 @@ function getCountry(event) {
 // DATES
 // ============================================================
 
-function parseEventDate(value) {
+function parseDate(event) {
+    const value =
+        event.event_date ||
+        event.date ||
+        event.datetime ||
+        event.time;
 
     if (!value) {
         return null;
@@ -117,139 +180,246 @@ function parseEventDate(value) {
 
     const date = new Date(value);
 
-    if (Number.isNaN(date.getTime())) {
+    if (isNaN(date.getTime())) {
         return null;
     }
 
     return date;
 }
 
-
-function formatEventDate(value) {
-
-    const date = parseEventDate(value);
+function formatDate(event) {
+    const date = parseDate(event);
 
     if (!date) {
         return "Date inconnue";
     }
 
-    return new Intl.DateTimeFormat(
-        "fr-FR",
-        {
-            timeZone: CONFIG.timezone,
-            day: "2-digit",
-            month: "2-digit",
-            year: "numeric",
-            hour: "2-digit",
-            minute: "2-digit"
-        }
-    ).format(date);
+    return new Intl.DateTimeFormat("fr-FR", {
+        timeZone: CONFIG.TIMEZONE,
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit"
+    }).format(date);
 }
 
-
-function getEventStatus(event) {
-
-    const date = parseEventDate(
-        event?.event_date
-    );
+function isPast(event) {
+    const date = parseDate(event);
 
     if (!date) {
-        return "upcoming";
+        return false;
     }
 
-    const now = Date.now();
+    return date.getTime() < Date.now();
+}
 
-    const difference =
-        date.getTime() - now;
 
-    const liveWindow =
-        CONFIG.liveWindowMinutes * 60 * 1000;
+// ============================================================
+// SCORE
+// ============================================================
 
+function getScore(event) {
     if (
-        difference <= 0 &&
-        Math.abs(difference) <= liveWindow
+        event.hexapulse_score !== undefined &&
+        event.hexapulse_score !== null
     ) {
-        return "live";
+        return Number(event.hexapulse_score);
     }
 
-    if (difference < 0) {
-        return "past";
+    const impact = normalizeImpact(event.impact);
+
+    if (impact === "FORT") {
+        return 80;
     }
 
-    return "upcoming";
+    if (impact === "MOYEN") {
+        return 55;
+    }
+
+    return 25;
 }
 
 
 // ============================================================
-// TRI
+// EVENEMENTS
 // ============================================================
 
-function sortEvents(eventList) {
+function sortEvents(events) {
+    return [...events].sort((a, b) => {
+        const dateA = parseDate(a);
+        const dateB = parseDate(b);
 
-    return [...eventList].sort(
-        (a, b) => {
+        if (!dateA && !dateB) return 0;
+        if (!dateA) return 1;
+        if (!dateB) return -1;
 
-            const dateA =
-                parseEventDate(
-                    a.event_date
-                )?.getTime() || 0;
+        return dateA - dateB;
+    });
+}
 
-            const dateB =
-                parseEventDate(
-                    b.event_date
-                )?.getTime() || 0;
+function filterEvents(events) {
+    if (currentFilter === "all") {
+        return events;
+    }
 
-            return dateA - dateB;
-        }
-    );
+    return events.filter(event => {
+        const impact = normalizeImpact(event.impact);
+
+        return impact === currentFilter;
+    });
 }
 
 
 // ============================================================
-// FILTRES
+// CARTE EVENEMENT
 // ============================================================
 
-function filterEvents() {
-
-    const search =
-        filters.search
-            .toLowerCase()
-            .trim();
-
-    return events.filter(
-        event => {
-
-            const countryMatch =
-                filters.country === "ALL" ||
-                getCountry(event) ===
-                filters.country;
-
-            const impactMatch =
-                filters.impact === "ALL" ||
-                normalizeImpact(
-                    event.impact
-                ) === filters.impact;
-
-            const searchable = [
-                event.title,
-                event.country,
-                event.currency,
-                event.description
-            ]
-                .join(" ")
-                .toLowerCase();
-
-            const searchMatch =
-                !search ||
-                searchable.includes(search);
-
-            return (
-                countryMatch &&
-                impactMatch &&
-                searchMatch
-            );
-        }
+function renderEvent(event) {
+    const title = cleanText(
+        event.title || "Annonce économique"
     );
+
+    const country = getCountry(event);
+    const impact = normalizeImpact(event.impact);
+    const impactClass = getImpactClass(event.impact);
+    const date = formatDate(event);
+    const score = getScore(event);
+
+    const indicatorType = cleanText(
+        event.indicator_type || "AUTRE"
+    );
+
+    const direction = cleanText(
+        event.direction || "NEUTRE"
+    );
+
+    const alertLevel = cleanText(
+        event.alert_level || "NORMAL"
+    );
+
+    const actual = cleanText(event.actual || "N/D");
+    const forecast = cleanText(event.forecast || "N/D");
+    const previous = cleanText(event.previous || "N/D");
+
+    const surprise =
+        event.surprise !== undefined &&
+        event.surprise !== null
+            ? cleanText(event.surprise)
+            : "N/D";
+
+    const assets = Array.isArray(event.assets)
+        ? event.assets.map(cleanText).join(", ")
+        : cleanText(event.assets || "");
+
+    return `
+        <article class="event-card">
+            <div class="event-top">
+                <span class="event-country">
+                    ${escapeHtml(country)}
+                </span>
+
+                <span class="event-impact ${impactClass}">
+                    ${escapeHtml(impact)}
+                </span>
+            </div>
+
+            <h3 class="event-title">
+                ${escapeHtml(title)}
+            </h3>
+
+            <div class="event-date">
+                ${escapeHtml(date)}
+            </div>
+
+            <div class="event-details">
+
+                <div class="detail-row">
+                    <span>Score HexaPulse</span>
+                    <strong>${escapeHtml(score)}/100</strong>
+                </div>
+
+                <div class="detail-row">
+                    <span>Indicateur</span>
+                    <strong>${escapeHtml(indicatorType)}</strong>
+                </div>
+
+                <div class="detail-row">
+                    <span>Direction</span>
+                    <strong>${escapeHtml(direction)}</strong>
+                </div>
+
+                <div class="detail-row">
+                    <span>Niveau</span>
+                    <strong>${escapeHtml(alertLevel)}</strong>
+                </div>
+
+                <div class="detail-row">
+                    <span>Actuel</span>
+                    <strong>${escapeHtml(actual)}</strong>
+                </div>
+
+                <div class="detail-row">
+                    <span>Prévision</span>
+                    <strong>${escapeHtml(forecast)}</strong>
+                </div>
+
+                <div class="detail-row">
+                    <span>Précédent</span>
+                    <strong>${escapeHtml(previous)}</strong>
+                </div>
+
+                <div class="detail-row">
+                    <span>Surprise</span>
+                    <strong>${escapeHtml(surprise)}</strong>
+                </div>
+
+                ${
+                    assets
+                        ? `
+                            <div class="detail-row">
+                                <span>Actifs concernés</span>
+                                <strong>${escapeHtml(assets)}</strong>
+                            </div>
+                        `
+                        : ""
+                }
+
+            </div>
+        </article>
+    `;
+}
+
+
+// ============================================================
+// AFFICHAGE EVENEMENTS
+// ============================================================
+
+function renderEvents() {
+    const container =
+        document.getElementById("eventsContainer") ||
+        document.getElementById("events");
+
+    if (!container) {
+        return;
+    }
+
+    const filtered = filterEvents(
+        sortEvents(allEvents)
+    );
+
+    if (filtered.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                Aucun événement trouvé.
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = filtered
+        .map(renderEvent)
+        .join("");
 }
 
 
@@ -258,930 +428,51 @@ function filterEvents() {
 // ============================================================
 
 function updateStats() {
+    const total = allEvents.length;
 
-    const strong = events.filter(
-        event =>
-            normalizeImpact(
-                event.impact
-            ) === "Fort"
+    const strong = allEvents.filter(
+        event => normalizeImpact(event.impact) === "FORT"
     ).length;
 
-    const medium = events.filter(
-        event =>
-            normalizeImpact(
-                event.impact
-            ) === "Moyen"
+    const medium = allEvents.filter(
+        event => normalizeImpact(event.impact) === "MOYEN"
     ).length;
 
-    const total = events.length;
+    const totalElement =
+        document.getElementById("totalEvents");
 
-    const values =
-        document.querySelectorAll(
-            ".stat-value"
-        );
+    const strongElement =
+        document.getElementById("strongEvents");
 
-    if (values.length >= 4) {
+    const mediumElement =
+        document.getElementById("mediumEvents");
 
-        values[0].textContent = total;
-        values[1].textContent = strong;
-        values[2].textContent = medium;
-        values[3].textContent = "LIVE";
+    if (totalElement) {
+        totalElement.textContent = total;
+    }
+
+    if (strongElement) {
+        strongElement.textContent = strong;
+    }
+
+    if (mediumElement) {
+        mediumElement.textContent = medium;
     }
 }
 
 
 // ============================================================
-// CALCULS
-// ============================================================
-
-function parseNumber(value) {
-
-    if (
-        value === null ||
-        value === undefined ||
-        value === ""
-    ) {
-        return null;
-    }
-
-    let text = String(value)
-        .replace("%", "")
-        .replace(",", ".")
-        .trim();
-
-    const number =
-        Number.parseFloat(text);
-
-    return Number.isFinite(number)
-        ? number
-        : null;
-}
-
-
-function calculateDifference(
-    actual,
-    forecast
-) {
-
-    const a =
-        parseNumber(actual);
-
-    const f =
-        parseNumber(forecast);
-
-    if (a === null || f === null) {
-        return null;
-    }
-
-    return a - f;
-}
-
-
-// ============================================================
-// TYPE D'INDICATEUR
-// ============================================================
-
-function getIndicatorType(title) {
-
-    const text = String(
-        title || ""
-    ).toLowerCase();
-
-    if (
-        text.includes("inflation") ||
-        text.includes("cpi") ||
-        text.includes("hicp") ||
-        text.includes("prices") ||
-        text.includes("prix")
-    ) {
-        return "inflation";
-    }
-
-    if (
-        text.includes("interest rate") ||
-        text.includes("interest rates") ||
-        text.includes("rate decision") ||
-        text.includes("taux") ||
-        text.includes("ecb") ||
-        text.includes("bce") ||
-        text.includes("fed") ||
-        text.includes("central bank")
-    ) {
-        return "rates";
-    }
-
-    if (
-        text.includes("unemployment") ||
-        text.includes("chômage")
-    ) {
-        return "unemployment";
-    }
-
-    if (
-        text.includes("employment") ||
-        text.includes("jobs") ||
-        text.includes("payroll") ||
-        text.includes("nonfarm") ||
-        text.includes("wages") ||
-        text.includes("salaires")
-    ) {
-        return "employment";
-    }
-
-    if (
-        text.includes("gdp") ||
-        text.includes("pib") ||
-        text.includes("growth") ||
-        text.includes("croissance")
-    ) {
-        return "gdp";
-    }
-
-    if (
-        text.includes("pmi") ||
-        text.includes("manufacturing") ||
-        text.includes("services") ||
-        text.includes("activity") ||
-        text.includes("activité")
-    ) {
-        return "pmi";
-    }
-
-    if (
-        text.includes("retail sales") ||
-        text.includes("ventes au détail")
-    ) {
-        return "retail";
-    }
-
-    if (
-        text.includes("confidence") ||
-        text.includes("sentiment") ||
-        text.includes("confiance")
-    ) {
-        return "confidence";
-    }
-
-    if (
-        text.includes("industrial production") ||
-        text.includes("production industrielle")
-    ) {
-        return "industrial";
-    }
-
-    return "generic";
-}
-
-
-// ============================================================
-// SURPRISE
-// ============================================================
-
-function getSurpriseLevel(
-    difference
-) {
-
-    if (difference === null) {
-        return "neutral";
-    }
-
-    const absolute =
-        Math.abs(difference);
-
-    if (absolute >= 2) {
-        return "strong";
-    }
-
-    if (absolute >= 1) {
-        return "medium";
-    }
-
-    return "weak";
-}
-
-
-function getEconomicDirection(
-    event,
-    difference
-) {
-
-    if (difference === null) {
-        return {
-            direction: "neutral",
-            label: "Pas assez de données"
-        };
-    }
-
-    const type =
-        getIndicatorType(
-            event.title
-        );
-
-    const higher =
-        difference > 0;
-
-    if (type === "inflation") {
-
-        return higher
-            ? {
-                direction: "negative",
-                label: "Pression inflationniste"
-            }
-            : {
-                direction: "positive",
-                label: "Désinflation"
-            };
-    }
-
-    if (type === "rates") {
-
-        return higher
-            ? {
-                direction: "negative",
-                label: "Orientation hawkish"
-            }
-            : {
-                direction: "positive",
-                label: "Orientation dovish"
-            };
-    }
-
-    if (type === "unemployment") {
-
-        return higher
-            ? {
-                direction: "negative",
-                label: "Marché du travail plus faible"
-            }
-            : {
-                direction: "positive",
-                label: "Marché du travail plus solide"
-            };
-    }
-
-    if (
-        type === "employment" ||
-        type === "gdp" ||
-        type === "pmi" ||
-        type === "retail" ||
-        type === "confidence" ||
-        type === "industrial"
-    ) {
-
-        return higher
-            ? {
-                direction: "positive",
-                label: "Donnée meilleure que prévu"
-            }
-            : {
-                direction: "negative",
-                label: "Donnée moins bonne que prévu"
-            };
-    }
-
-    return higher
-        ? {
-            direction: "positive",
-            label: "Au-dessus des prévisions"
-        }
-        : {
-            direction: "negative",
-            label: "Sous les prévisions"
-        };
-}
-
-
-function getSurpriseAnalysis(event) {
-
-    const difference =
-        calculateDifference(
-            event.actual,
-            event.forecast
-        );
-
-    if (difference === null) {
-        return null;
-    }
-
-    const level =
-        getSurpriseLevel(
-            difference
-        );
-
-    const direction =
-        getEconomicDirection(
-            event,
-            difference
-        );
-
-    return {
-        difference,
-        level,
-        ...direction
-    };
-}
-
-
-// ============================================================
-// SCORE HEXAPULSE
-// ============================================================
-
-function calculateHexapulseScore(
-    event
-) {
-
-    let score = 35;
-
-    const impact =
-        normalizeImpact(
-            event.impact
-        );
-
-    if (impact === "Fort") {
-        score += 35;
-    }
-
-    if (impact === "Moyen") {
-        score += 20;
-    }
-
-    const surprise =
-        getSurpriseAnalysis(
-            event
-        );
-
-    if (surprise) {
-
-        const absolute =
-            Math.abs(
-                surprise.difference
-            );
-
-        if (absolute >= 2) {
-            score += 25;
-        } else if (absolute >= 1) {
-            score += 15;
-        } else if (absolute >= 0.5) {
-            score += 8;
-        }
-    }
-
-    if (
-        getEventStatus(event) ===
-        "live"
-    ) {
-        score += 5;
-    }
-
-    return Math.min(
-        100,
-        Math.max(0, score)
-    );
-}
-
-
-function getScoreClass(score) {
-
-    if (score >= 80) {
-        return "score-high";
-    }
-
-    if (score >= 55) {
-        return "score-medium";
-    }
-
-    return "score-low";
-}
-
-
-// ============================================================
-// ANALYSE MARCHÉ
-// ============================================================
-
-function getMarketAssets(
-    event
-) {
-
-    const currency =
-        String(
-            event.currency || ""
-        ).toUpperCase();
-
-    const country =
-        getCountry(event);
-
-    const assets = [];
-
-    if (currency === "USD") {
-        assets.push("USD");
-    }
-
-    if (currency === "EUR") {
-        assets.push("EUR");
-    }
-
-    if (currency === "GBP") {
-        assets.push("GBP");
-    }
-
-    if (currency === "CHF") {
-        assets.push("CHF");
-    }
-
-    if (
-        country === "FR" ||
-        country === "DE" ||
-        country === "IT" ||
-        country === "ES"
-    ) {
-        assets.push("CAC 40");
-        assets.push("EURO STOXX 50");
-    }
-
-    if (
-        country === "GB"
-    ) {
-        assets.push("FTSE 100");
-    }
-
-    if (
-        country === "CH"
-    ) {
-        assets.push("SMI");
-    }
-
-    return [
-        ...new Set(assets)
-    ];
-}
-
-
-function getMarketAnalysis(
-    event
-) {
-
-    const surprise =
-        getSurpriseAnalysis(
-            event
-        );
-
-    const assets =
-        getMarketAssets(
-            event
-        );
-
-    if (!surprise) {
-
-        return {
-            message:
-                "Surveille les actifs concernés.",
-            assets
-        };
-    }
-
-    let message =
-        surprise.label + ".";
-
-    if (
-        surprise.direction ===
-        "positive"
-    ) {
-        message +=
-            " Réaction potentiellement favorable aux actifs concernés.";
-    }
-
-    if (
-        surprise.direction ===
-        "negative"
-    ) {
-        message +=
-            " Réaction potentiellement défavorable aux actifs concernés.";
-    }
-
-    return {
-        message,
-        assets
-    };
-}
-
-
-// ============================================================
-// CARTE ÉVÉNEMENT
-// ============================================================
-
-function createEventCard(event) {
-
-    const status =
-        getEventStatus(event);
-
-    const impact =
-        normalizeImpact(
-            event.impact
-        );
-
-    const score =
-        calculateHexapulseScore(
-            event
-        );
-
-    const surprise =
-        getSurpriseAnalysis(
-            event
-        );
-
-    const market =
-        getMarketAnalysis(
-            event
-        );
-
-    let statusLabel =
-        "À venir";
-
-    if (status === "live") {
-        statusLabel = "EN DIRECT";
-    }
-
-    if (status === "past") {
-        statusLabel = "Passé";
-    }
-
-    const surpriseHtml =
-        surprise
-            ? `
-                <div class="surprise-analysis">
-
-                    <div class="surprise-title">
-                        Surprise économique
-                    </div>
-
-                    <div class="
-                        surprise-result
-                        surprise-${escapeHtml(
-                            surprise.direction
-                        )}
-                    ">
-                        ${escapeHtml(
-                            surprise.label
-                        )}
-                    </div>
-
-                    <div class="surprise-message">
-                        Écart :
-                        ${surprise.difference >= 0 ? "+" : ""}
-                        ${surprise.difference.toFixed(2)}
-                    </div>
-                </div>
-            `
-            : "";
-
-
-    const assetsHtml =
-        market.assets.length
-            ? `
-                <div class="analysis-assets">
-                    ${market.assets.map(
-                        asset => `
-                            <span class="analysis-asset">
-                                ${escapeHtml(asset)}
-                            </span>
-                        `
-                    ).join("")}
-                </div>
-            `
-            : "";
-
-
-    return `
-        <article class="event-card">
-
-            <div class="event-main">
-
-                <div class="event-time">
-                    ${formatEventDate(
-                        event.event_date
-                    )}
-                </div>
-
-                <div class="event-content">
-
-                    <div class="event-top">
-
-                        <h3 class="event-title">
-                            ${displayValue(
-                                event.title
-                            )}
-                        </h3>
-
-                        <div class="event-badges">
-
-                            <span class="
-                                event-impact
-                                ${getImpactClass(
-                                    impact
-                                )}
-                            ">
-                                ${escapeHtml(
-                                    impact
-                                )}
-                            </span>
-
-                            <span class="event-status">
-                                ${statusLabel}
-                            </span>
-
-                        </div>
-
-                    </div>
-
-                    <div class="event-meta">
-
-                        <span>
-                            ${escapeHtml(
-                                getCountry(event)
-                            )}
-                        </span>
-
-                        <span>
-                            ${escapeHtml(
-                                event.currency || "—"
-                            )}
-                        </span>
-
-                        <span>
-                            ${escapeHtml(
-                                event.source || "BiQuote"
-                            )}
-                        </span>
-
-                    </div>
-
-                    <div class="event-values">
-
-                        <div class="event-value">
-                            <small>Actuel</small>
-                            <strong>
-                                ${displayValue(
-                                    event.actual
-                                )}
-                            </strong>
-                        </div>
-
-                        <div class="event-value">
-                            <small>Prévision</small>
-                            <strong>
-                                ${displayValue(
-                                    event.forecast
-                                )}
-                            </strong>
-                        </div>
-
-                        <div class="event-value">
-                            <small>Précédent</small>
-                            <strong>
-                                ${displayValue(
-                                    event.previous
-                                )}
-                            </strong>
-                        </div>
-
-                    </div>
-
-                    <div class="event-details">
-
-                        ${
-                            event.description
-                                ? `
-                                    <p>
-                                        ${displayValue(
-                                            event.description
-                                        )}
-                                    </p>
-                                `
-                                : ""
-                        }
-
-                        <div class="market-analysis">
-
-                            <div class="analysis-header">
-                                <span class="analysis-label">
-                                    HEXAPULSE INTELLIGENCE
-                                </span>
-                            </div>
-
-                            <div class="analysis-message">
-                                ${escapeHtml(
-                                    market.message
-                                )}
-                            </div>
-
-                            ${assetsHtml}
-
-                        </div>
-
-                        <div class="hexapulse-score">
-
-                            <div class="score-header">
-
-                                <span class="score-title">
-                                    HexaPulse Score
-                                </span>
-
-                                <strong class="
-                                    score-value
-                                    ${getScoreClass(
-                                        score
-                                    )}
-                                ">
-                                    ${score}/100
-                                </strong>
-
-                            </div>
-
-                            <div class="score-bar">
-                                <div
-                                    class="
-                                        score-bar-fill
-                                        ${getScoreClass(
-                                            score
-                                        )}
-                                    "
-                                    style="
-                                        width:${score}%;
-                                    "
-                                ></div>
-                            </div>
-
-                        </div>
-
-                        ${surpriseHtml}
-
-                    </div>
-
-                </div>
-
-                <div class="event-arrow">
-                    →
-                </div>
-
-            </div>
-
-        </article>
-    `;
-}
-
-
-// ============================================================
-// RENDU DES ÉVÉNEMENTS
-// ============================================================
-
-function renderEvents() {
-
-    const container =
-        document.getElementById(
-            "eventsContainer"
-        );
-
-    if (!container) {
-        return;
-    }
-
-    const filtered =
-        sortEvents(
-            filterEvents()
-        );
-
-
-    if (!filtered.length) {
-
-        container.innerHTML = `
-            <div class="empty-state">
-                Aucun événement trouvé.
-            </div>
-        `;
-
-        return;
-    }
-
-
-    container.innerHTML =
-        filtered.map(
-            createEventCard
-        ).join("");
-}
-
-
-// ============================================================
-// FILTRES DYNAMIQUES
-// ============================================================
-
-function setupFilters() {
-
-    const filterButtons =
-        document.querySelectorAll(
-            ".filter-btn"
-        );
-
-    filterButtons.forEach(
-        button => {
-
-            button.addEventListener(
-                "click",
-                () => {
-
-                    const type =
-                        button.dataset.filter;
-
-                    const value =
-                        button.dataset.value ||
-                        "ALL";
-
-                    if (
-                        type === "country"
-                    ) {
-                        filters.country =
-                            value;
-                    }
-
-                    if (
-                        type === "impact"
-                    ) {
-                        filters.impact =
-                            value;
-                    }
-
-                    document
-                        .querySelectorAll(
-                            `.filter-btn[data-filter="${type}"]`
-                        )
-                        .forEach(
-                            item =>
-                                item.classList.remove(
-                                    "active"
-                                )
-                        );
-
-                    button.classList.add(
-                        "active"
-                    );
-
-                    renderEvents();
-                }
-            );
-        }
-    );
-
-
-    const searchInput =
-        document.querySelector(
-            ".filter-search"
-        );
-
-    if (searchInput) {
-
-        searchInput.addEventListener(
-            "input",
-            event => {
-
-                filters.search =
-                    event.target.value;
-
-                renderEvents();
-            }
-        );
-    }
-}
-
-
-// ============================================================
-// CHARGEMENT DES DONNÉES
+// CHARGEMENT DES EVENEMENTS
 // ============================================================
 
 async function loadEvents() {
-
-    const container =
-        document.getElementById(
-            "eventsContainer"
-        );
-
-    if (container) {
-
-        container.innerHTML = `
-            <div class="loading-state">
-                Chargement des annonces...
-            </div>
-        `;
-    }
-
-
     try {
-
-        const response =
-            await fetch(
-                CONFIG.apiUrl,
-                {
-                    cache: "no-store"
-                }
-            );
+        const response = await fetch(
+            `${CONFIG.API_URL}?_=${Date.now()}`,
+            {
+                cache: "no-store"
+            }
+        );
 
         if (!response.ok) {
             throw new Error(
@@ -1189,268 +480,191 @@ async function loadEvents() {
             );
         }
 
-        const data =
-            await response.json();
+        const data = await response.json();
 
-        if (
-            !data.success ||
-            !Array.isArray(data.events)
-        ) {
+        if (!data.success) {
             throw new Error(
                 "Réponse API invalide"
             );
         }
 
-        events =
-            data.events;
+        allEvents = Array.isArray(data.events)
+            ? data.events
+            : [];
 
-        updateStats();
         renderEvents();
-        loadAlerts();
+        updateStats();
 
     } catch (error) {
-
         console.error(
-            "Erreur HexaPulse :",
+            "Erreur chargement événements :",
             error
         );
-
-        if (container) {
-
-            container.innerHTML = `
-                <div class="error-state">
-                    Impossible de charger
-                    les annonces.
-                    <br><br>
-                    Vérifie que le serveur
-                    HexaPulse est lancé.
-                </div>
-            `;
-        }
     }
 }
 
 
 // ============================================================
-// ALERTES HEXAPULSE
+// ALERTES
 // ============================================================
 
+function renderAlerts(alerts) {
+    const container =
+        document.getElementById("alertsContainer") ||
+        document.getElementById("alerts");
+
+    if (!container) {
+        return;
+    }
+
+    if (!Array.isArray(alerts) || alerts.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                Aucune alerte importante.
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = alerts.map(alert => {
+
+        const message = cleanAlertMessage(
+            alert.alert_message ||
+            alert.message ||
+            alert.intelligence_message ||
+            ""
+        );
+
+        const level = cleanText(
+            alert.alert_level ||
+            alert.level ||
+            "IMPORTANT"
+        );
+
+        return `
+            <div class="alert-card">
+                <div class="alert-message">
+                    ${escapeHtml(message)}
+                </div>
+
+                <div class="alert-level">
+                    ${escapeHtml(level)}
+                </div>
+            </div>
+        `;
+    }).join("");
+}
+
 async function loadAlerts() {
-
     try {
-
-        const response =
-            await fetch(
-                CONFIG.alertsUrl,
-                {
-                    cache: "no-store"
-                }
-            );
+        const response = await fetch(
+            `${CONFIG.ALERTS_URL}?_=${Date.now()}`,
+            {
+                cache: "no-store"
+            }
+        );
 
         if (!response.ok) {
             return;
         }
 
-        const data =
-            await response.json();
+        const data = await response.json();
 
-        if (
-            !data.success ||
-            !Array.isArray(
-                data.alerts
-            )
-        ) {
-            return;
-        }
+        const alerts =
+            Array.isArray(data)
+                ? data
+                : (
+                    Array.isArray(data.alerts)
+                        ? data.alerts
+                        : []
+                );
 
-        renderSiteAlerts(
-            data.alerts
-        );
+        renderAlerts(alerts);
 
     } catch (error) {
-
         console.error(
-            "Erreur alertes :",
+            "Erreur chargement alertes :",
             error
         );
     }
 }
 
 
-function renderSiteAlerts(
-    alerts
-) {
+// ============================================================
+// ACTUALISATION
+// ============================================================
 
-    let container =
-        document.getElementById(
-            "hexapulseLiveAlerts"
+async function refreshAll() {
+    await loadEvents();
+    await loadAlerts();
+}
+
+window.refreshAll = refreshAll;
+
+
+// ============================================================
+// FILTRES
+// ============================================================
+
+function setupFilters() {
+    const buttons =
+        document.querySelectorAll(
+            "[data-filter]"
         );
 
+    buttons.forEach(button => {
+        button.addEventListener(
+            "click",
+            () => {
 
-    if (!container) {
+                currentFilter =
+                    button.dataset.filter ||
+                    "all";
 
-        container =
-            document.createElement(
-                "div"
-            );
+                buttons.forEach(btn => {
+                    btn.classList.remove(
+                        "active"
+                    );
+                });
 
-        container.id =
-            "hexapulseLiveAlerts";
+                button.classList.add("active");
 
-
-        const eventsContainer =
-            document.getElementById(
-                "eventsContainer"
-            );
-
-
-        if (
-            eventsContainer &&
-            eventsContainer.parentNode
-        ) {
-
-            eventsContainer.parentNode.insertBefore(
-                container,
-                eventsContainer
-            );
-        }
-    }
-
-
-    if (!alerts.length) {
-
-        container.innerHTML = "";
-
-        return;
-    }
-
-
-    container.innerHTML = `
-
-        <div class="live-alert-header">
-
-            <span class="live-alert-dot"></span>
-
-            <span>
-                ALERTES HEXAPULSE
-            </span>
-
-            <span class="live-alert-count">
-                ${alerts.length}
-            </span>
-
-        </div>
-
-        <div class="live-alert-list">
-
-            ${alerts.slice(0, 5).map(
-                alert => `
-
-                    <div class="live-alert-item">
-
-                        <div class="live-alert-level">
-
-                            ${escapeHtml(
-                                alert.level
-                            )}
-
-                        </div>
-
-                        <div class="live-alert-content">
-
-                            <strong>
-                                ${escapeHtml(
-                                    alert.title
-                                )}
-                            </strong>
-
-                            <span>
-                                ${escapeHtml(
-                                    alert.message
-                                )}
-                            </span>
-
-                        </div>
-
-                    </div>
-
-                `
-            ).join("")}
-
-        </div>
-    `;
+                renderEvents();
+            }
+        );
+    });
 }
 
 
 // ============================================================
-// BOUTON ACTUALISER
+// PREMIUM
 // ============================================================
 
-function setupRefresh() {
-
+function setupPremium() {
     const button =
-        document.querySelector(
-            "[data-refresh]"
-        ) ||
-        document.querySelector(
-            "button"
+        document.getElementById(
+            "premiumButton"
         );
 
+    const message =
+        document.getElementById(
+            "premiumMessage"
+        );
 
     if (!button) {
         return;
     }
 
-
     button.addEventListener(
         "click",
-        async () => {
+        () => {
 
-            button.disabled = true;
-
-            const originalText =
-                button.textContent;
-
-            button.textContent =
-                "Actualisation...";
-
-
-            try {
-
-                await fetch(
-                    "/api/sync",
-                    {
-                        cache: "no-store"
-                    }
-                );
-
-            } catch (error) {
-
-                console.error(error);
-
+            if (message) {
+                message.textContent =
+                    "Le Premium HexaPulse sera bientôt disponible.";
             }
-
-
-            await loadEvents();
-
-
-            button.disabled = false;
-
-            button.textContent =
-                originalText;
         }
     );
-}
-
-
-// ============================================================
-// RAFRAÎCHISSEMENT DU STATUT
-// ============================================================
-
-function refreshStatus() {
-
-    renderEvents();
-    loadAlerts();
 }
 
 
@@ -1458,325 +672,29 @@ function refreshStatus() {
 // WATER INTELLIGENCE
 // ============================================================
 
-const WATER_KEYWORDS = {
-
-    "Stress hydrique": [
-        "water",
-        "drought",
-        "sécheresse",
-        "stress hydrique",
-        "eau",
-        "water scarcity"
-    ],
-
-    "Infrastructures": [
-        "water infrastructure",
-        "infrastructure",
-        "pipeline",
-        "reservoir",
-        "irrigation"
-    ],
-
-    "Dessalement": [
-        "desalination",
-        "dessalement"
-    ],
-
-    "Technologies": [
-        "water technology",
-        "water treatment",
-        "filtration",
-        "purification",
-        "traitement de l'eau"
-    ],
-
-    "Réglementation": [
-        "water regulation",
-        "regulation",
-        "directive",
-        "réglementation"
-    ],
-
-    "Agriculture": [
-        "agriculture",
-        "agricultural",
-        "crop",
-        "irrigation",
-        "récolte"
-    ]
-};
-
-
-const WATER_THEMES = [
-    "Stress hydrique",
-    "Infrastructures",
-    "Dessalement",
-    "Technologies",
-    "Réglementation",
-    "Agriculture"
-];
-
-
-function getWaterCategories(
-    event
-) {
-
-    const text = [
-        event.title,
-        event.description
-    ]
-        .join(" ")
-        .toLowerCase();
-
-    const categories = [];
-
-    for (
-        const [category, keywords]
-        of Object.entries(
-            WATER_KEYWORDS
-        )
-    ) {
-
-        if (
-            keywords.some(
-                keyword =>
-                    text.includes(
-                        keyword
-                    )
-            )
-        ) {
-            categories.push(
-                category
-            );
-        }
-    }
-
-    return categories;
-}
-
-
-function getWaterRiskScore(
-    event
-) {
-
-    const categories =
-        getWaterCategories(
-            event
-        );
-
-    let score = 0;
-
-    score +=
-        categories.length * 15;
-
-    if (
-        normalizeImpact(
-            event.impact
-        ) === "Fort"
-    ) {
-        score += 30;
-    }
-
-    if (
-        normalizeImpact(
-            event.impact
-        ) === "Moyen"
-    ) {
-        score += 15;
-    }
-
-    return Math.min(
-        100,
-        score
-    );
-}
-
-
-function getWaterRiskLabel(
-    score
-) {
-
-    if (score >= 70) {
-        return "Élevé";
-    }
-
-    if (score >= 40) {
-        return "Modéré";
-    }
-
-    return "Faible";
-}
-
-
-function getWaterSignals() {
-
-    return events
-        .map(event => ({
-            event,
-            categories:
-                getWaterCategories(
-                    event
-                ),
-            score:
-                getWaterRiskScore(
-                    event
-                )
-        }))
-        .filter(
-            item =>
-                item.categories.length > 0
-        )
-        .sort(
-            (a, b) =>
-                b.score - a.score
-        );
-}
-
-
-function renderWaterIntelligence() {
-
-    const sections =
-        document.querySelectorAll(
-            "section"
-        );
-
-    let waterSection = null;
-
-    sections.forEach(
-        section => {
-
-            const text =
-                section.textContent
-                    .toLowerCase();
-
-            if (
-                text.includes(
-                    "water watchlist"
-                ) ||
-                text.includes(
-                    "stress hydrique"
-                )
-            ) {
-                waterSection =
-                    section;
-            }
-        }
-    );
-
-
-    if (!waterSection) {
-        return;
-    }
-
-
-    let panel =
+function setupWater() {
+    const button =
         document.getElementById(
-            "hexapulseWaterPanel"
+            "waterButton"
         );
 
-
-    if (!panel) {
-
-        panel =
-            document.createElement(
-                "div"
-            );
-
-        panel.id =
-            "hexapulseWaterPanel";
-
-        waterSection.appendChild(
-            panel
+    const section =
+        document.getElementById(
+            "waterSection"
         );
-    }
 
-
-    const signals =
-        getWaterSignals();
-
-
-    if (!signals.length) {
-
-        panel.innerHTML = `
-            <div class="water-intelligence-panel">
-                <strong>
-                    WATER INTELLIGENCE
-                </strong>
-
-                <p>
-                    Aucun signal eau détecté
-                    dans les annonces actuelles.
-                </p>
-            </div>
-        `;
-
+    if (!button || !section) {
         return;
     }
 
-
-    panel.innerHTML = `
-
-        <div class="water-intelligence-panel">
-
-            <div class="water-panel-header">
-
-                <div>
-                    <span class="analysis-label">
-                        WATER INTELLIGENCE
-                    </span>
-
-                    <h3>
-                        Signaux détectés
-                    </h3>
-                </div>
-
-                <span class="water-signal-count">
-                    ${signals.length}
-                </span>
-
-            </div>
-
-            <div class="water-signals">
-
-                ${signals.slice(0, 8).map(
-                    item => `
-
-                        <div class="water-signal">
-
-                            <div>
-
-                                <strong>
-                                    ${escapeHtml(
-                                        item.event.title
-                                    )}
-                                </strong>
-
-                                <small>
-                                    ${item.categories
-                                        .map(
-                                            category =>
-                                                escapeHtml(
-                                                    category
-                                                )
-                                        )
-                                        .join(" · ")}
-                                </small>
-
-                            </div>
-
-                            <span>
-                                ${item.score}/100
-                            </span>
-
-                        </div>
-
-                    `
-                ).join("")}
-
-            </div>
-
-        </div>
-    `;
+    button.addEventListener(
+        "click",
+        () => {
+            section.classList.toggle(
+                "active"
+            );
+        }
+    );
 }
 
 
@@ -1789,102 +707,15 @@ document.addEventListener(
     () => {
 
         setupFilters();
+        setupPremium();
+        setupWater();
 
-        setupRefresh();
+        refreshAll();
 
-        loadEvents();
-
-        renderWaterIntelligence();
-
-
+        // Actualisation automatique
         setInterval(
-            refreshStatus,
-            CONFIG.statusRefreshMs
+            refreshAll,
+            60 * 1000
         );
-
-
-        setInterval(
-            loadAlerts,
-            CONFIG.alertsRefreshMs
-        );
-
     }
 );
-// ============================================================
-// HEXAPULSE PREMIUM
-// ============================================================
-
-document.addEventListener("DOMContentLoaded", () => {
-
-    const premiumButton =
-        document.getElementById("premiumButton");
-
-    const premiumMessage =
-        document.getElementById("premiumMessage");
-
-    if (!premiumButton) {
-        return;
-    }
-
-    premiumButton.addEventListener("click", async () => {
-
-        premiumButton.disabled = true;
-
-        premiumButton.innerHTML = `
-            Chargement...
-        `;
-
-        if (premiumMessage) {
-            premiumMessage.textContent = "";
-        }
-
-        try {
-
-            const response = await fetch("/api/premium");
-
-            if (!response.ok) {
-                throw new Error("Erreur Premium");
-            }
-
-            const data = await response.json();
-
-            if (premiumMessage) {
-
-                premiumMessage.innerHTML = `
-                    <div class="premium-success">
-                        <strong>HexaPulse Premium</strong>
-                        <br>
-                        ${data.message || "Fonctionnalités Premium disponibles."}
-                        <br><br>
-                        <strong>4,99 € / mois</strong>
-                    </div>
-                `;
-
-            }
-
-        } catch (error) {
-
-            console.error(
-                "[PREMIUM]",
-                error
-            );
-
-            if (premiumMessage) {
-
-                premiumMessage.textContent =
-                    "Impossible de charger Premium pour le moment.";
-
-            }
-
-        }
-
-        premiumButton.disabled = false;
-
-        premiumButton.innerHTML = `
-            Découvrir Premium
-            <span>→</span>
-        `;
-
-    });
-
-});

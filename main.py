@@ -6,8 +6,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-import hashlib
-import requests
+import re
 
 from database import (
     init_database,
@@ -15,25 +14,20 @@ from database import (
     get_events
 )
 
+from intelligence import analyze_event
+from data_sources import collect_all_sources
+
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
 APP_NAME = "HexaPulse"
-APP_VERSION = "2.0.0"
-
-BIQUOTE_URL = "https://biquote.io/api/calendar"
+APP_VERSION = "2.2.0"
 
 PARIS_TZ = ZoneInfo("Europe/Paris")
 
 CACHE_DURATION = 15 * 60
-
-EUROPE_CODES = {
-    "FR", "EU", "DE", "IT", "ES", "BE", "NL",
-    "PT", "IE", "AT", "GR", "FI", "SE", "DK",
-    "NO", "CH", "GB"
-}
 
 
 # ============================================================
@@ -43,6 +37,8 @@ EUROPE_CODES = {
 BASE_DIR = Path(__file__).resolve().parent
 
 STATIC_DIR = BASE_DIR / "static"
+
+INDEX_FILE = STATIC_DIR / "index.html"
 
 
 # ============================================================
@@ -56,16 +52,21 @@ app = FastAPI(
 )
 
 
+# ============================================================
+# FICHIERS STATIQUES
+# ============================================================
+
 app.mount(
     "/static",
-    StaticFiles(
-        directory=STATIC_DIR
-    ),
+    StaticFiles(directory=str(STATIC_DIR)),
     name="static"
 )
 
 
-# Dernière synchronisation
+# ============================================================
+# SYNCHRONISATION
+# ============================================================
+
 last_sync_time = None
 
 
@@ -81,554 +82,312 @@ init_database()
 # ============================================================
 
 def paris_now():
-
-    return datetime.now(
-        PARIS_TZ
-    )
+    return datetime.now(PARIS_TZ)
 
 
 def utc_now():
-
-    return datetime.now(
-        timezone.utc
-    )
+    return datetime.now(timezone.utc)
 
 
 # ============================================================
-# NORMALISATION DATE
+# NETTOYAGE TEXTE
 # ============================================================
 
-def normalize_datetime(value):
-
-    if not value:
-        return None
-
-    try:
-
-        value = str(
-            value
-        ).strip()
-
-        if value.endswith("Z"):
-
-            value = (
-                value[:-1]
-                + "+00:00"
-            )
-
-        dt = datetime.fromisoformat(
-            value
-        )
-
-        if dt.tzinfo is None:
-
-            dt = dt.replace(
-                tzinfo=timezone.utc
-            )
-
-        return dt.astimezone(
-            PARIS_TZ
-        ).isoformat()
-
-    except Exception:
-
-        return None
-
-
-# ============================================================
-# NORMALISATION IMPACT
-# ============================================================
-
-def normalize_impact(value):
-
+def clean_text(value):
     if value is None:
+        return ""
 
-        return "Faible"
+    text = str(value)
 
-    text = str(
-        value
-    ).strip().lower()
+    # Décodage HTML plusieurs fois
+    import html
 
-    if text in {
-        "high",
-        "fort",
-        "forte",
-        "important",
-        "important!",
-        "3",
-        "3.0",
-        "red"
-    }:
+    for _ in range(3):
+        decoded = html.unescape(text)
 
-        return "Fort"
+        if decoded == text:
+            break
 
-    if text in {
-        "medium",
-        "moderate",
-        "moyen",
-        "moyenne",
-        "2",
-        "2.0",
-        "orange"
-    }:
+        text = decoded
 
-        return "Moyen"
+    # Suppression de Markdown parasite
+    text = text.replace("**", "")
+    text = text.replace("__", "")
 
-    return "Faible"
+    # Suppression de quelques caractères d'échappement
+    text = text.replace("\\*", "*")
+    text = text.replace("\\_", "_")
+    text = text.replace("\\`", "`")
+    text = text.replace("\\<", "<")
+    text = text.replace("\\>", ">")
+    text = text.replace("\\#", "#")
+
+    # Espaces multiples
+    text = re.sub(r"\s+", " ", text)
+
+    return text.strip()
 
 
 # ============================================================
-# IDENTIFIANT UNIQUE
+# NORMALISATION DES EVENEMENTS
 # ============================================================
 
-def generate_external_id(event):
+def clean_event(event):
+    """
+    Nettoie un événement déjà normalisé par data_sources.py.
+    """
 
-    existing_id = (
-        event.get("id")
-        or event.get("event_id")
-        or event.get("uuid")
-        or event.get("external_id")
-    )
-
-    if existing_id:
-
-        return str(
-            existing_id
-        )
-
-    raw = "|".join([
-        str(
-            event.get(
-                "country",
-                ""
-            )
-        ),
-
-        str(
-            event.get(
-                "title",
-                ""
-            )
-        ),
-
-        str(
-            event.get(
-                "date",
-                ""
-            )
-        ),
-
-        str(
-            event.get(
-                "datetime",
-                ""
-            )
-        ),
-
-        str(
-            event.get(
-                "time",
-                ""
-            )
-        )
-    ])
-
-    return hashlib.sha256(
-        raw.encode(
-            "utf-8"
-        )
-    ).hexdigest()[:32]
-
-
-# ============================================================
-# NORMALISATION EVENEMENT
-# ============================================================
-
-def normalize_event(event):
-
-    if not isinstance(
-        event,
-        dict
-    ):
-
+    if not isinstance(event, dict):
         return None
 
+    cleaned = dict(event)
 
-    title = (
-        event.get("title")
-        or event.get("name")
-        or event.get("event")
-        or event.get("label")
-        or "Annonce économique"
+    cleaned["title"] = clean_text(
+        event.get("title", "Annonce économique")
     )
 
-
-    country = (
-        event.get("country")
-        or event.get("country_code")
-        or event.get("code")
-        or ""
-    )
-
-    country = str(
-        country
+    cleaned["country"] = str(
+        event.get("country", "")
     ).upper().strip()
 
-
-    currency = (
-        event.get("currency")
-        or event.get("curr")
-        or ""
-    )
-
-    currency = str(
-        currency
+    cleaned["currency"] = str(
+        event.get("currency", "")
     ).upper().strip()
 
-
-    impact = normalize_impact(
-        event.get("impact")
-        or event.get("importance")
-        or event.get("impact_level")
-        or event.get("priority")
+    cleaned["impact"] = clean_text(
+        event.get("impact", "Faible")
     )
 
-
-    raw_date = (
-        event.get("datetime")
-        or event.get("date")
-        or event.get("timestamp")
-        or event.get("time")
+    cleaned["actual"] = clean_text(
+        event.get("actual", "")
     )
 
-
-    event_date = normalize_datetime(
-        raw_date
+    cleaned["forecast"] = clean_text(
+        event.get("forecast", "")
     )
 
-
-    description = (
-        event.get("description")
-        or event.get("detail")
-        or event.get("details")
-        or ""
+    cleaned["previous"] = clean_text(
+        event.get("previous", "")
     )
 
-
-    actual = event.get(
-        "actual"
+    cleaned["description"] = clean_text(
+        event.get("description", "")
     )
 
-    forecast = event.get(
-        "forecast"
+    cleaned["source"] = clean_text(
+        event.get("source", "BiQuote")
     )
 
-    previous = event.get(
-        "previous"
-    )
-
-
-    external_id = generate_external_id(
-        event
-    )
-
-
-    source = (
-        event.get("source")
-        or "BiQuote"
-    )
-
-
-    return {
-
-        "external_id": external_id,
-
-        "title": str(
-            title
-        ),
-
-        "country": country,
-
-        "currency": currency,
-
-        "impact": impact,
-
-        "event_date": event_date,
-
-        "actual": (
-            ""
-            if actual is None
-            else str(actual)
-        ),
-
-        "forecast": (
-            ""
-            if forecast is None
-            else str(forecast)
-        ),
-
-        "previous": (
-            ""
-            if previous is None
-            else str(previous)
-        ),
-
-        "description": str(
-            description
-        ),
-
-        "source": str(
-            source
-        ),
-
-        "created_at":
-            utc_now().isoformat()
-    }
+    return cleaned
 
 
 # ============================================================
-# EXTRACTION EVENEMENTS
+# SYNCHRONISATION DES DONNEES
 # ============================================================
 
-def extract_events(data):
+def sync_events(force=False):
+    global last_sync_time
 
-    if isinstance(
-        data,
-        list
-    ):
+    now = utc_now()
 
-        return data
+    # --------------------------------------------------------
+    # CACHE
+    # --------------------------------------------------------
 
+    if not force and last_sync_time:
 
-    if not isinstance(
-        data,
-        dict
-    ):
+        elapsed = (
+            now - last_sync_time
+        ).total_seconds()
 
-        return []
+        if elapsed < CACHE_DURATION:
 
+            current_events = get_events(
+                limit=200
+            )
 
-    possible_keys = [
-        "events",
-        "annonces",
-        "data",
-        "calendar",
-        "results",
-        "items"
-    ]
+            return {
+                "success": True,
+                "synced": False,
+                "reason": "cache",
+                "count": len(current_events)
+            }
 
-
-    for key in possible_keys:
-
-        value = data.get(
-            key
-        )
-
-
-        if isinstance(
-            value,
-            list
-        ):
-
-            return value
-
-
-        if isinstance(
-            value,
-            dict
-        ):
-
-            for nested_key in possible_keys:
-
-                nested_value = value.get(
-                    nested_key
-                )
-
-                if isinstance(
-                    nested_value,
-                    list
-                ):
-
-                    return nested_value
-
-
-    return []
-
-
-# ============================================================
-# RECUPERATION BIQUOTE
-# ============================================================
-
-def fetch_external_events():
+    # --------------------------------------------------------
+    # RECUPERATION VIA DATA SOURCES
+    # --------------------------------------------------------
 
     try:
 
-        response = requests.get(
+        print()
+        print("[HEXAPULSE] Synchronisation des données...")
+        print()
 
-            BIQUOTE_URL,
-
-            timeout=15,
-
-            headers={
-                "User-Agent":
-                    "HexaPulse/2.0"
-            }
-        )
-
-
-        response.raise_for_status()
-
-
-        data = response.json()
-
-
-        raw_events = extract_events(
-            data
-        )
-
-
-        normalized_events = []
-
-
-        for event in raw_events:
-
-            normalized = normalize_event(
-                event
-            )
-
-
-            if not normalized:
-
-                continue
-
-
-            country = normalized[
-                "country"
-            ]
-
-
-            if country not in EUROPE_CODES:
-
-                continue
-
-
-            if not normalized[
-                "event_date"
-            ]:
-
-                continue
-
-
-            normalized_events.append(
-                normalized
-            )
-
-
-        return normalized_events
-
-
-    except requests.RequestException as error:
-
-        print(
-            "Erreur connexion API BiQuote:",
-            error
-        )
-
-        return []
-
+        events = collect_all_sources()
 
     except Exception as error:
 
         print(
-            "Erreur récupération annonces:",
+            "[HEXAPULSE] Erreur récupération données :",
             error
         )
 
-        return []
+        return {
+            "success": False,
+            "synced": False,
+            "reason": "source_error",
+            "count": len(
+                get_events(limit=200)
+            )
+        }
 
-
-# ============================================================
-# SYNCHRONISATION
-# ============================================================
-
-def sync_events(
-    force=False
-):
-
-    global last_sync_time
-
-
-    now = utc_now()
-
-
-    if (
-        not force
-        and last_sync_time
-    ):
-
-        elapsed = (
-            now
-            - last_sync_time
-        ).total_seconds()
-
-
-        if elapsed < CACHE_DURATION:
-
-            return {
-
-                "success": True,
-
-                "synced": False,
-
-                "reason": "cache",
-
-                "count":
-                    len(
-                        get_events()
-                    )
-            }
-
-
-    events = fetch_external_events()
-
+    # --------------------------------------------------------
+    # AUCUNE DONNEE
+    # --------------------------------------------------------
 
     if not events:
 
+        print(
+            "[HEXAPULSE] Aucun événement reçu."
+        )
+
         return {
-
             "success": False,
-
             "synced": False,
-
             "reason": "api_empty",
-
-            "count":
-                len(
-                    get_events()
-                )
+            "count": len(
+                get_events(limit=200)
+            )
         }
 
+    # --------------------------------------------------------
+    # NETTOYAGE
+    # --------------------------------------------------------
+
+    cleaned_events = []
+
+    for event in events:
+
+        cleaned = clean_event(event)
+
+        if cleaned:
+            cleaned_events.append(cleaned)
+
+    # --------------------------------------------------------
+    # SAUVEGARDE
+    # --------------------------------------------------------
 
     saved = save_events(
-        events
+        cleaned_events
     )
-
 
     last_sync_time = now
 
+    print(
+        f"[HEXAPULSE] Événements reçus : "
+        f"{len(cleaned_events)}"
+    )
+
+    print(
+        f"[HEXAPULSE] Événements enregistrés : "
+        f"{saved}"
+    )
+
+    print()
 
     return {
-
         "success": True,
-
         "synced": True,
-
-        "count": len(
-            events
-        ),
-
+        "count": len(cleaned_events),
         "saved": saved
     }
+
+
+# ============================================================
+# INTELLIGENCE HEXAPULSE
+# ============================================================
+
+def enrich_events_with_intelligence(events):
+
+    enriched_events = []
+
+    for event in events:
+
+        try:
+
+            analysis = analyze_event(
+                event
+            )
+
+            enriched_event = dict(event)
+
+            enriched_event["hexapulse_score"] = (
+                analysis["score"]
+            )
+
+            enriched_event["indicator_type"] = (
+                analysis["indicator_type"]
+            )
+
+            enriched_event["surprise"] = (
+                analysis["surprise"]
+            )
+
+            enriched_event["direction"] = (
+                analysis["direction"]
+            )
+
+            enriched_event["assets"] = (
+                analysis["assets"]
+            )
+
+            enriched_event["alert_level"] = (
+                analysis["alert_level"]
+            )
+
+            enriched_event["intelligence_message"] = (
+                clean_text(
+                    analysis["message"]
+                )
+            )
+
+            enriched_events.append(
+                enriched_event
+            )
+
+        except Exception as error:
+
+            print(
+                "[INTELLIGENCE] Erreur analyse :",
+                error
+            )
+
+            enriched_events.append(
+                event
+            )
+
+    return enriched_events
+
+
+# ============================================================
+# PAGE PRINCIPALE
+# ============================================================
+
+@app.get("/")
+def home():
+
+    if not INDEX_FILE.exists():
+
+        return {
+            "error": "index.html introuvable",
+            "path": str(INDEX_FILE),
+            "static_directory": str(STATIC_DIR)
+        }
+
+    return FileResponse(
+        path=str(INDEX_FILE),
+        media_type="text/html"
+    )
 
 
 # ============================================================
@@ -642,156 +401,139 @@ def api_alerts():
         limit=200
     )
 
+    enriched_events = (
+        enrich_events_with_intelligence(
+            events
+        )
+    )
+
     alerts = []
 
+    seen_alerts = set()
 
-    for event in events:
+    for event in enriched_events:
 
-        impact = str(
-            event.get(
-                "impact"
-            )
-            or ""
-        ).lower()
-
-
-        actual = event.get(
-            "actual"
+        alert_level = event.get(
+            "alert_level"
         )
 
-        forecast = event.get(
-            "forecast"
-        )
-
-
-        # ----------------------------------------------------
-        # IMPACT FORT
-        # ----------------------------------------------------
-
-        if impact in {
-            "high",
-            "fort",
-            "3",
-            "3.0"
+        # Seulement les vraies alertes
+        if alert_level not in {
+            "IMPORTANT",
+            "CRITIQUE"
         }:
+            continue
 
-            alerts.append({
+        title = clean_text(
+            event.get(
+                "title",
+                "Annonce économique"
+            )
+        )
 
-                "type": "impact",
+        country = str(
+            event.get(
+                "country",
+                ""
+            )
+        ).strip().upper()
 
-                "level": "FORT",
+        event_date = str(
+            event.get(
+                "event_date",
+                ""
+            )
+        ).strip()
 
-                "title": event.get(
-                    "title",
-                    "Annonce économique"
-                ),
+        # Déduplication
+        alert_key = (
+            re.sub(
+                r"\s+",
+                " ",
+                title.lower()
+            ).strip(),
+            country,
+            event_date
+        )
 
-                "country": event.get(
-                    "country",
-                    ""
-                ),
+        if alert_key in seen_alerts:
+            continue
 
-                "event_date":
-                    event.get(
-                        "event_date"
-                    ),
+        seen_alerts.add(
+            alert_key
+        )
 
-                "message":
-                    "Annonce économique "
-                    "à fort impact potentiel."
-            })
+        message = clean_text(
+            event.get(
+                "intelligence_message",
+                ""
+            )
+        )
 
+        alerts.append({
 
-        # ----------------------------------------------------
-        # SURPRISE
-        # ----------------------------------------------------
+            "type": "intelligence",
 
-        try:
+            "level": alert_level,
 
-            if actual and forecast:
+            "title": title,
 
-                actual_number = float(
-                    str(actual)
-                    .replace(",", ".")
-                    .replace("%", "")
-                    .strip()
+            "country": country,
+
+            "event_date": event_date,
+
+            "score": event.get(
+                "hexapulse_score",
+                0
+            ),
+
+            "indicator_type": event.get(
+                "indicator_type",
+                "AUTRE"
+            ),
+
+            "surprise": event.get(
+                "surprise"
+            ),
+
+            "direction": event.get(
+                "direction",
+                "NEUTRE"
+            ),
+
+            "assets": event.get(
+                "assets",
+                []
+            ),
+
+            "message": message
+        })
+
+    # Tri
+    alerts.sort(
+        key=lambda alert: (
+            0
+            if alert["level"] == "CRITIQUE"
+            else 1,
+
+            -int(
+                alert.get(
+                    "score",
+                    0
                 )
-
-
-                forecast_number = float(
-                    str(forecast)
-                    .replace(",", ".")
-                    .replace("%", "")
-                    .strip()
-                )
-
-
-                difference = (
-                    actual_number
-                    - forecast_number
-                )
-
-
-                if abs(
-                    difference
-                ) >= 1:
-
-                    alerts.append({
-
-                        "type":
-                            "surprise",
-
-                        "level":
-                            "SURPRISE",
-
-                        "title":
-                            event.get(
-                                "title",
-                                "Annonce économique"
-                            ),
-
-                        "country":
-                            event.get(
-                                "country",
-                                ""
-                            ),
-
-                        "event_date":
-                            event.get(
-                                "event_date"
-                            ),
-
-                        "message":
-                            (
-                                "Écart vs prévision : "
-                                f"{difference:+.2f}"
-                            )
-                    })
-
-
-        except (
-            ValueError,
-            TypeError
-        ):
-
-            pass
-
+            )
+        )
+    )
 
     return {
-
         "success": True,
-
-        "count": len(
-            alerts
-        ),
-
-        "alerts":
-            alerts[:20]
+        "count": len(alerts),
+        "alerts": alerts[:20]
     }
 
 
 # ============================================================
-# PREMIUM — INFORMATIONS
+# PREMIUM
 # ============================================================
 
 @app.get("/api/premium")
@@ -807,84 +549,53 @@ def api_premium():
 
             "status": "preview",
 
-            "name":
-                "HexaPulse Premium",
+            "name": "HexaPulse Premium",
+
+            "price": "4.99 EUR",
 
             "features": [
 
                 {
-                    "id":
-                        "custom_alerts",
-
-                    "name":
-                        "Alertes personnalisées",
-
+                    "id": "custom_alerts",
+                    "name": "Alertes personnalisées",
                     "description":
-                        "Choisis les pays, "
-                        "indicateurs et niveaux "
-                        "d'impact à surveiller."
+                        "Choisis les pays, indicateurs et niveaux d’impact à surveiller."
                 },
 
                 {
-                    "id":
-                        "advanced_analysis",
-
-                    "name":
-                        "Analyse avancée",
-
+                    "id": "advanced_analysis",
+                    "name": "Analyse avancée",
                     "description":
-                        "Analyse automatique "
-                        "des annonces économiques."
+                        "Analyse automatique des annonces économiques."
                 },
 
                 {
-                    "id":
-                        "watchlists",
-
-                    "name":
-                        "Watchlists",
-
+                    "id": "watchlists",
+                    "name": "Watchlists",
                     "description":
-                        "Surveille tes indicateurs "
-                        "et thèmes favoris."
+                        "Surveille tes indicateurs et thèmes favoris."
                 },
 
                 {
-                    "id":
-                        "water_intelligence",
-
-                    "name":
-                        "Water Intelligence",
-
+                    "id": "water_intelligence",
+                    "name": "Water Intelligence",
                     "description":
-                        "Surveillance approfondie "
-                        "du secteur de l'eau."
+                        "Surveillance approfondie du secteur de l’eau."
                 },
 
                 {
-                    "id":
-                        "surprise_alerts",
-
-                    "name":
-                        "Surprise Alerts",
-
+                    "id": "surprise_alerts",
+                    "name": "Surprise Alerts",
                     "description":
-                        "Détection des écarts "
-                        "entre données et prévisions."
+                        "Détection des écarts entre données et prévisions."
                 },
 
                 {
-                    "id":
-                        "advanced_score",
-
-                    "name":
-                        "HexaPulse Score avancé",
-
+                    "id": "advanced_score",
+                    "name": "HexaPulse Score avancé",
                     "description":
-                        "Score économique enrichi "
-                        "et analyse directionnelle."
+                        "Score économique enrichi et analyse directionnelle."
                 }
-
             ]
         }
     }
@@ -906,64 +617,30 @@ def premium_watchlist():
         "watchlist": [
 
             {
-                "name":
-                    "Inflation",
-
-                "type":
-                    "indicator",
-
-                "status":
-                    "active"
+                "name": "Inflation",
+                "type": "indicator",
+                "status": "active"
             },
 
             {
-                "name":
-                    "Taux directeurs",
-
-                "type":
-                    "central_bank",
-
-                "status":
-                    "active"
+                "name": "Taux directeurs",
+                "type": "central_bank",
+                "status": "active"
             },
 
             {
-                "name":
-                    "Marché du travail",
-
-                "type":
-                    "employment",
-
-                "status":
-                    "active"
+                "name": "Marché du travail",
+                "type": "employment",
+                "status": "active"
             },
 
             {
-                "name":
-                    "Water Intelligence",
-
-                "type":
-                    "sector",
-
-                "status":
-                    "active"
+                "name": "Water Intelligence",
+                "type": "sector",
+                "status": "active"
             }
-
         ]
     }
-
-
-# ============================================================
-# PAGE PRINCIPALE
-# ============================================================
-
-@app.get("/")
-def home():
-
-    return FileResponse(
-        STATIC_DIR
-        / "index.html"
-    )
 
 
 # ============================================================
@@ -977,14 +654,11 @@ def health():
 
         "status": "ok",
 
-        "service":
-            APP_NAME,
+        "service": APP_NAME,
 
-        "version":
-            APP_VERSION,
+        "version": APP_VERSION,
 
-        "timezone":
-            "Europe/Paris"
+        "timezone": "Europe/Paris"
     }
 
 
@@ -997,26 +671,21 @@ def api_time():
 
     now = paris_now()
 
-
     return {
 
         "success": True,
 
-        "timezone":
-            "Europe/Paris",
+        "timezone": "Europe/Paris",
 
-        "datetime":
-            now.isoformat(),
+        "datetime": now.isoformat(),
 
-        "date":
-            now.strftime(
-                "%d/%m/%Y"
-            ),
+        "date": now.strftime(
+            "%d/%m/%Y"
+        ),
 
-        "time":
-            now.strftime(
-                "%H:%M"
-            )
+        "time": now.strftime(
+            "%H:%M"
+        )
     }
 
 
@@ -1029,24 +698,25 @@ def api_annonces():
 
     sync_result = sync_events()
 
-
     events = get_events(
         limit=200
     )
 
+    events = (
+        enrich_events_with_intelligence(
+            events
+        )
+    )
 
     return {
 
         "success": True,
 
-        "service":
-            APP_NAME,
+        "service": APP_NAME,
 
-        "timezone":
-            "Europe/Paris",
+        "timezone": "Europe/Paris",
 
-        "count":
-            len(events),
+        "count": len(events),
 
         "updated_at":
             paris_now().isoformat(),
@@ -1080,11 +750,15 @@ def api_sync():
         force=True
     )
 
-
     events = get_events(
         limit=200
     )
 
+    events = (
+        enrich_events_with_intelligence(
+            events
+        )
+    )
 
     return {
 
@@ -1120,11 +794,9 @@ def api_info():
 
     return {
 
-        "name":
-            APP_NAME,
+        "name": APP_NAME,
 
-        "version":
-            APP_VERSION,
+        "version": APP_VERSION,
 
         "description":
             "Economic Intelligence",
@@ -1132,29 +804,21 @@ def api_info():
         "timezone":
             "Europe/Paris",
 
-        "premium":
-            True,
+        "premium": True,
+
+        "intelligence": True,
 
         "endpoints": [
 
             "/",
-
             "/health",
-
             "/api",
-
             "/api/time",
-
             "/api/annonces",
-
             "/api/events",
-
             "/api/sync",
-
             "/api/alerts",
-
             "/api/premium",
-
             "/api/premium/watchlist"
         ]
     }
@@ -1168,14 +832,9 @@ if __name__ == "__main__":
 
     import uvicorn
 
-
     uvicorn.run(
-
         "main:app",
-
         host="127.0.0.1",
-
         port=8000,
-
         reload=True
     )
